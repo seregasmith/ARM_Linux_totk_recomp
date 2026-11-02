@@ -165,6 +165,9 @@ int mem_frozen(uint64_t a);                                // the 2 MiB region o
 void mem_thaw(uint64_t a, uint64_t n);                     // makes the frozen regions over [a, a+n) writable again;
                                                            // before a kernel write (file read) into guest memory
 void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws, uint64_t *other_thaws);
+// Region write tracking (memory.c, where the system tracks no page writes) since the last call: regions reported by
+// queries that reset, those of them cooling down, those it could not freeze. 1 while that tracking is on.
+int mem_region_stats(uint64_t *reported, uint64_t *cooling, uint64_t *unfreezable);
                                                            // regions frozen now; freezes and thaws since the last call
 void mem_kernel_free(void *p, uint64_t size);              // TLR/TLS reuse after thread exit
 

@@ -10,6 +10,10 @@
 #if defined(__x86_64__) || defined(_M_X64)
 #include "fp_x86.h"
 #include <immintrin.h>
+#elif defined(__aarch64__)
+#include "fp_arm64.h"
+#else
+#error "platform.h: no FP control header for this architecture (fp_x86.h, fp_arm64.h)"
 #endif
 
 // ---- threads
@@ -91,6 +95,8 @@ void plat_yield(void);                    // gives the rest of the time slice to
 static inline void plat_pause(void) {     // spin-wait hint
 #if defined(__x86_64__) || defined(_M_X64)
     _mm_pause();
+#elif defined(__aarch64__)
+    __asm__ volatile("yield");
 #endif
 }
 
@@ -211,6 +217,9 @@ int plat_mem_state(uint64_t addr, uint64_t limit, uint64_t *end);
 // The pages of a watched reservation written since the last reset, up to max page addresses into pages, in address
 // order; reset: those reported start over as unwritten. UINT64_MAX when writes to the range are not tracked.
 uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t max, int reset);
+// Why writes to watched reservations are not tracked, from the first failure (the system call and its error); NULL
+// while nothing failed. Linux: userfaultfd with asynchronous write protection and PAGEMAP_SCAN (Linux 6.7, arm64 6.10).
+const char *plat_mem_watch_problem(void);
 // A write that faulted on a read-only page at addr goes to fn first; fn returns 1 when it made the page writable and
 // the write should run again, 0 to let the fault go on (to the crash handler). One hook per process.
 void plat_mem_fault_hook(int (*fn)(uint64_t addr));

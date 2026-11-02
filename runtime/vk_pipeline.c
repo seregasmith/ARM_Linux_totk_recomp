@@ -33,7 +33,7 @@
 // binding strides only); and, where VK_EXT_extended_dynamic_state3 offers them, depth clamp, polygon mode, blend enables,
 // equations, write masks and alpha to coverage. The key holds the rest: shaders, target formats, sample count, topology
 // class, depth clip mode, logic op and what is not dynamic on the GPU. The VkPipelineCache persists to
-// pipeline-cache.bin next to totk.exe (TOTK_PIPELINE_CACHE overrides the path).
+// pipeline-cache.bin in cfg_data_dir, next to totk.exe by default (TOTK_PIPELINE_CACHE overrides the path).
 //
 // Provenance: the NVN -> Vulkan enum mappings (blend factors and equations, compare functions, stencil ops), the vertex
 // format table with its 3-component fallback and the pipeline cache file handling follow LAS Recomp
@@ -144,8 +144,9 @@ static uint64_t fnv(uint64_t h, const void *p, size_t n) {
 // than the lookup. Only the in-memory table uses it; the key file keeps fnv.
 static uint64_t key_hash(const void *k, size_t n) { return nvn_hm_hash(k, (uint32_t)n); }
 
-// The cache file lives next to totk.exe, so every build dir (the main build and each private fork) has its own:
-// forks that shared build\v121's cache broke each other's runs (2026-10-22).
+// The cache file lives in cfg_data_dir, next to totk.exe unless TOTK_DATA_DIR names a folder, so every build dir (the
+// main build and each private fork) has its own: forks that shared build\v121's cache broke each other's runs
+// (2026-10-22).
 static void cache_path_init(void) {
     const char *cfg_path = cfg_get("TOTK_PIPELINE_CACHE");
     if (cfg_path && *cfg_path && strlen(cfg_path) < sizeof P.cache_path) {
@@ -153,13 +154,8 @@ static void cache_path_init(void) {
         return;
     }
     P.cache_path[0] = 0;
-    char exe[PLAT_PATH_MAX * 2];
-    int n = plat_exe_path(exe, sizeof exe);
-    if (!n || n >= sizeof exe) return;
-    char *cut = plat_last_sep(exe);
-    if (!cut) return;
-    *cut = 0;
-    snprintf(P.cache_path, sizeof P.cache_path, "%s/pipeline-cache.bin", exe);
+    char dir[PLAT_PATH_MAX * 2];
+    if (cfg_data_dir(dir, sizeof dir)) snprintf(P.cache_path, sizeof P.cache_path, "%s/pipeline-cache.bin", dir);
 }
 
 // Cache data whose header names another device or driver is dropped before Vulkan sees it.

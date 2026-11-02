@@ -5,7 +5,7 @@
 // Input: <romfs>/romfs.bin (rt_config()->romfs), whose six IVFC levels and SHA-256 tools/extract.py verified, and
 // romfs-index.bin next to totk.exe (TOTK_ROMFS_INDEX overrides), which tools/romfs_index.py wrote together with
 // romfs_config.h. fs_init checks the index's SHA-256 and layout and the image size. The full 17 GB hash runs only with
-// TOTK_ROMFS_VERIFY=full; a proof file (.romfs-verified-v1 next to the index, or in TOTK_ROMFS_PROOF_DIR) keyed by
+// TOTK_ROMFS_VERIFY=full; a proof file (.romfs-verified-v1 next to the index, in TOTK_DATA_DIR or TOTK_ROMFS_PROOF_DIR) keyed by
 // the file's volume, file id, size and times skips it on later starts, TOTK_ROMFS_VERIFY=force ignores the proof.
 //
 // Reads are positional (platform.h plat_file_pread), so threads read the image in parallel without a file-pointer
@@ -140,7 +140,9 @@ static void verify_image(const char *dir) {
     const char *mode = cfg_get("TOTK_ROMFS_VERIFY");
     if (!mode || (strcmp(mode, "full") && strcmp(mode, "force"))) return;
     const char *pdir = cfg_get("TOTK_ROMFS_PROOF_DIR");
+    char data[2048];
     if (pdir && *pdir) dir = pdir;
+    else if (cfg_data_dir(data, sizeof data) == 2) dir = data;   // TOTK_DATA_DIR: the index's folder may be read-only
     RomfsProof want = {0}, saved;
     memcpy(want.magic, "TOTKRFS-PROOF-1", 16);
     memcpy(want.sha256, ROMFS_IMAGE_SHA256, sizeof ROMFS_IMAGE_SHA256 < 65 ? sizeof ROMFS_IMAGE_SHA256 : 65);

@@ -1,7 +1,8 @@
 """Build hactool: toolchain/hactool/hactool.exe (SciresM/hactool at a pinned commit + tools/hactool/*.patch).
 
 Fetches the pinned commit into toolchain/src/hactool, resets it (local changes and build output there are discarded),
-applies portable.patch (MacNativeGames' Windows-relevant changes) and unicode.patch (ours), and builds a static exe
+applies portable.patch (MacNativeGames' Windows-relevant changes) and unicode.patch, mbedtls-asm-clobbers.patch and
+memory-errors.patch (ours), and builds a static exe
 with MSYS2 UCRT64 gcc; mbedtls comes with hactool's tree. The exe and hactool's LICENSE go to toolchain/hactool, where
 tools/extract.py and tools/make_release.py take them. Run with .venv. On Linux: the system's cc and make build
 toolchain/hactool/hactool (unicode.patch only adds a Windows manifest, under EXEEXT .exe).
@@ -20,7 +21,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 URL = 'https://github.com/SciresM/hactool.git'
 COMMIT = '1d64a83450e025622f3468c28fc4164dad2c5ef6'
-PATCHES = [ROOT / 'tools' / 'hactool' / n for n in ('portable.patch', 'unicode.patch', 'mbedtls-asm-clobbers.patch')]
+PATCHES = [ROOT / 'tools' / 'hactool' / n
+           for n in ('portable.patch', 'unicode.patch', 'mbedtls-asm-clobbers.patch', 'memory-errors.patch')]
 WIN = os.name == 'nt'
 MSYS_BASH = Path(r'C:\msys64\usr\bin\bash.exe')
 EXE = 'hactool.exe' if WIN else 'hactool'

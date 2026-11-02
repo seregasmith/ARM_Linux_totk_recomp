@@ -597,6 +597,10 @@ static uint64_t ww_query(uint64_t addr, uint64_t size) {
     uint64_t t0 = qpc();
     uint64_t n = mem_written_pages(addr, size, gen_pages, sizeof gen_pages / sizeof *gen_pages);
     uint64_t dt = qpc() - t0;
+    static int told;   // once: memory.c tracks the watched reservations (by page or by region), not the rest
+    if (n == UINT64_MAX && !told++)
+        rt_log("mem: write watch: %#llx+%#llx lies outside the watched reservations: what the GPU uses there is "
+               "uploaded whole at every check", (unsigned long long)addr, (unsigned long long)size);
     ww_ticks += dt, ww_calls++, ww_bytes += size;
     if (n && n != UINT64_MAX) ww_dirty_calls++, ww_dirty_ticks += dt, ww_pages += n;
     return n;
@@ -1165,6 +1169,15 @@ static PlatMutex mirror_stat_lock = PLAT_MUTEX_INIT;
 static volatile int64_t m_live_n, m_live_bytes, m_refused_n[MR_N], m_refused_bytes[MR_N];
 static volatile int64_t m_flush_calls, m_flush_bytes, v_pages, v_skipped, v_mismatch;
 
+int vk_mem_shadow_wanted(void) {
+    const char *sh = cfg_get("TOTK_SHADOW");
+#ifdef _WIN32
+    return sh && *sh ? strcmp(sh, "0") != 0 : plat_is_wine();
+#else
+    return !sh || !*sh || strcmp(sh, "0");
+#endif
+}
+
 static void mirror_mode(int discrete) {
     const char *e = cfg_value("TOTK_MEMORY");
     int mode = discrete ? 1 : 0;   // 0 import, 1 mirror, 2 verify
@@ -1186,11 +1199,7 @@ static void mirror_mode(int discrete) {
     freeze_idle = fi && *fi ? atoi(fi) : 60;
     if (freeze_idle < 0) freeze_idle = 0;
     const char *sh = cfg_get("TOTK_SHADOW");
-#ifdef _WIN32
-    shadow_on = sh && *sh ? strcmp(sh, "0") != 0 : plat_is_wine();
-#else
-    shadow_on = !sh || !*sh || strcmp(sh, "0");
-#endif
+    shadow_on = vk_mem_shadow_wanted();
     if (shadow_on) rt_log("mem: shadow storage: CPU-visible pools are host-visible copies of guest memory, not imports%s",
                           sh && *sh ? " (TOTK_SHADOW)" : "");
     rt_log("mem: mode %s (%s): %s", mode == 2 ? "verify" : mode ? "mirror" : "import", why,
@@ -1635,14 +1644,19 @@ static void mirror_log(uint64_t frame) {
     plat_mutex_unlock(&gen_lock);
     double wf = frame > ww_last ? (double)(frame - ww_last) : 1.0;
     ww_last = frame;
-    uint64_t fz, ff, ft, fo;
+    uint64_t fz, ff, ft, fo, rr, rc, ru;
     mem_freeze_stats(&fz, &ff, &ft, &fo);
+    char regions[160] = "";
+    if (mem_region_stats(&rr, &rc, &ru))
+        snprintf(regions, sizeof regions, "; region tracking, per frame: %.1f regions reported, %.1f of them cooling down, "
+                 "%.1f not freezable", rr / wf, rc / wf, ru / wf);
     if (rt_trace & RT_TRACE_PERF)
         rt_log("mem: write-watch frame %llu: per frame, every consumer: %.1f queries over %.1f MiB, %.3f ms (%.1f found "
                "%.0f written pages, %.3f ms); frozen %.0f MiB; since the last line: freezes %llu, thaws by a write %llu, by a file read "
-               "or mapping change %llu, refused %llu",
+               "or mapping change %llu, refused %llu%s",
                (unsigned long long)frame, wc / wf, wb / wf / 1048576.0, qpc_ms(wt) / wf, dc / wf, wp / wf, qpc_ms(dt) / wf,
-               fz * 2.0, (unsigned long long)ff, (unsigned long long)ft, (unsigned long long)fo, (unsigned long long)nr);
+               fz * 2.0, (unsigned long long)ff, (unsigned long long)ft, (unsigned long long)fo, (unsigned long long)nr,
+               regions);
     if (!vk_mirror_on) return;
     plat_mutex_lock(&mirror_stat_lock);
     MirrorAcc a = macc;

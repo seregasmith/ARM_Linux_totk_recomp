@@ -1,5 +1,7 @@
-// Settings: the TOTK_* environment variables, with totk.ini next to totk.exe behind them.
+// Settings: the TOTK_* environment variables, with totk.ini (in cfg_data_dir, next to totk.exe by default) behind them.
 #pragma once
+
+#include <stddef.h>
 
 // getenv for a setting: the environment variable when set, else the totk.ini key (the name without "TOTK_", any
 // case), else the device profile's default (cfg.c: the Steam Deck), else NULL. Same string semantics as getenv; the pointer stays valid for the process (a value cfg_set replaces
@@ -8,6 +10,14 @@ const char *cfg_get(const char *name);
 
 // Reads totk.ini once, from mem_init after the address space is claimed and before any setting is read. Logs the file, its key count, unknown keys and environment overrides.
 void cfg_init(void);
+
+// The folder for the files the game writes: totk.ini, logs, the profile (saves), the shader and pipeline caches,
+// Mesa's shader cache, the mods folder and flight dumps. TOTK_DATA_DIR (the environment only: totk.ini is one of
+// those files), created on first use; else the folder of the executable, as for a copied game folder. The files the
+// build made (totk_xlate, romfs-index.bin, seed-*.bin, exefs, build-cache) stay next to the executable either way,
+// so a read-only install (the AppImage, tools/package_appimage.py) works with TOTK_DATA_DIR. Writes the folder without
+// a trailing separator to out; 2 for TOTK_DATA_DIR, 1 for the executable's folder, 0 when neither fits cap.
+int cfg_data_dir(char *out, size_t cap);
 
 // Replaces the loaded keys with those of the file at path (tests). 1 when the file was read, 0 when missing.
 // Not thread-safe: nothing else may call cfg_get meanwhile.
@@ -25,7 +35,7 @@ int cfg_from_env(const char *name);
 int cfg_is_set(const char *name);
 // The device profile in use, "deck" or "desktop" (TOTK_DEVICE_PROFILE, else what the machine is).
 const char *cfg_device_profile(void);
-// Writes the keys cfg_set changed since the last save into totk.ini next to totk.exe (cfg_save_to: the file at path).
+// Writes the keys cfg_set changed since the last save into totk.ini in cfg_data_dir (cfg_save_to: the file at path).
 // Only those lines change: the last line of a changed key gets the new value, a missing key goes under its section
 // (after the commented example line of the key when the section has one; the section is added at the end of the file
 // when missing), comments and every other line stay byte for byte. 1 on success or with nothing to write.

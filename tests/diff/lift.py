@@ -15,7 +15,6 @@ Usage: lift.py [--exefs DIR] [--modules main,sdk,subsdk0] [--encodings N] [--cas
 """
 import argparse
 import os
-import platform
 import random
 import sys
 import time
@@ -26,8 +25,8 @@ from pathlib import Path
 import numpy as np
 import unicorn as uc
 
-from common import BUF, BUF_SIZE, ROOT, Emu, build_harness, diff_state, dis, mnemonic, rand_fpcr, rand_v, rand_x, \
-    run_harness
+from common import BUF, BUF_SIZE, ROOT, Emu, build_harness, default_cflags, diff_state, dis, mnemonic, rand_fpcr, \
+    rand_v, rand_x, run_harness
 from lifter import Lifter, Unsupported, bits
 from nso import Nso
 
@@ -163,7 +162,7 @@ def main():
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4)
     ap.add_argument('--show', type=int, default=40)
-    ap.add_argument('--cflags', default='-march=x86-64-v3' if platform.machine().lower() in ('amd64', 'x86_64') else '')
+    ap.add_argument('--cflags', default=default_cflags())
     ap.add_argument('--coverage', action='store_true',
                     help='only lift every distinct word and list the rejected ones (capstone "?" = undecodable data)')
     args = ap.parse_args()

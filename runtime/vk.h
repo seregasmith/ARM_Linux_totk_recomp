@@ -42,7 +42,8 @@ typedef struct VkCtx {
     // (attachable images get feedback usage, a by-region barrier inside the pass); else (or TOTK_FEEDBACK=restart)
     // VK_FEEDBACK_RESTART (the pass ends and restarts behind the full barrier).
     int feedback;                           // VK_FEEDBACK_*
-    uint32_t min_imported_host_alignment;   // VK_EXT_external_memory_host
+    int has_external_memory_host;           // VK_EXT_external_memory_host is enabled (only imports need it)
+    uint32_t min_imported_host_alignment;   // VK_EXT_external_memory_host; 0 without it
     int device_index;                       // index in vkEnumeratePhysicalDevices
 } VkCtx;
 enum { VK_FEEDBACK_OFF, VK_FEEDBACK_RESTART, VK_FEEDBACK_LAYOUT };
@@ -226,6 +227,9 @@ void vk_mem_mirror_prologue(VkCommandBuffer cb);
 // write into CPU-visible memory at record time (vk_mem_gpu_pending) and reports it at the fence with vk_gpu_written,
 // which copies the bytes back into guest memory before telling the texture cache (vk_guest_written).
 void vk_mem_shadow_sync(void);
+// Whether CPU-visible pools get shadow storage rather than imports (TOTK_SHADOW; on by default off Windows and under
+// Wine). Known before the device is picked: only imports need VK_EXT_external_memory_host (vk_device.c).
+int vk_mem_shadow_wanted(void);
 void vk_mem_gpu_pending(uint64_t addr, uint64_t size);
 void vk_gpu_written(uint64_t addr, uint64_t size);
 int vk_mem_mirror_probe(uint64_t addr);   // --probe-vkexec: the pool at addr gets its mirror as on a first buffer use;

@@ -53,21 +53,20 @@ static int instance_ext_present(const char *name) {
     return found;
 }
 
-// Mesa's drivers (RADV on Linux and the Steam Deck) keep a shader cache of their own beside our pipeline cache, by
-// default in ~/.cache and up to 1 GB: about 35 MB in a minute of the title screen. A Deck's /home is small and the game
-// usually sits on the SD card, so unless MESA_SHADER_CACHE_DIR names a folder, it goes to mesa-cache beside the exe.
-static void mesa_cache_beside_exe(void) {
+// Mesa's drivers (RADV on Linux and the Steam Deck, Turnip on Snapdragon) keep a shader cache of their own beside our
+// pipeline cache, by default in ~/.cache and up to 1 GB: about 35 MB in a minute of the title screen. A Deck's /home is
+// small and the game usually sits on the SD card, so unless MESA_SHADER_CACHE_DIR names a folder, it goes to mesa-cache
+// in cfg_data_dir (beside the exe by default).
+static void mesa_cache_in_data_dir(void) {
     char dir[PLAT_PATH_MAX * 2];
     if (plat_getenv("MESA_SHADER_CACHE_DIR", dir, sizeof dir)) return;
-    int len = plat_exe_path(dir, sizeof dir - 16);
-    char *cut = len ? plat_last_sep(dir) : NULL;
-    if (!cut) return;
-    strcpy(cut + 1, "mesa-cache");
+    if (!cfg_data_dir(dir, sizeof dir - 16)) return;
+    strcat(dir, "/mesa-cache");
     plat_setenv("MESA_SHADER_CACHE_DIR", dir);
 }
 
 static int create_instance(void) {
-    mesa_cache_beside_exe();
+    mesa_cache_in_data_dir();
     const char *ext[12];
     uint32_t n_ext = (uint32_t)gfx_window_vk_extensions(ext, 7);
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
@@ -104,10 +103,11 @@ static int create_instance(void) {
 }
 
 static const char *const k_required_ext[] = {
-    VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME,
-    VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME};
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME};
 
-// Name of the first missing required extension, or NULL.
+// Name of the first missing required extension, or NULL. VK_EXT_external_memory_host is required only when CPU-visible
+// pools are imported host memory; shadow storage (Linux's default, vk_memory.c) never imports, and Turnip on Adreno,
+// for one, may not offer it.
 static const char *missing_required(VkPhysicalDevice pd) {
     uint32_t n = 0;
     vkEnumerateDeviceExtensionProperties(pd, NULL, &n, NULL);
@@ -116,6 +116,8 @@ static const char *missing_required(VkPhysicalDevice pd) {
     const char *miss = NULL;
     for (size_t i = 0; i < sizeof k_required_ext / sizeof *k_required_ext && !miss; i++)
         if (!has_ext(e, n, k_required_ext[i])) miss = k_required_ext[i];
+    if (!miss && !vk_mem_shadow_wanted() && !has_ext(e, n, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME))
+        miss = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME " (imports, TOTK_SHADOW=0)";
     free(e);
     return miss;
 }
@@ -227,6 +229,10 @@ static int create_device(void) {
     const char *ext[48];
     uint32_t n_ext = 0;
     for (size_t i = 0; i < sizeof k_required_ext / sizeof *k_required_ext; i++) ext[n_ext++] = k_required_ext[i];
+    if (has_ext(ep, ne, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) {
+        g_vk.has_external_memory_host = 1;
+        ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
+    }
 
     FeatureChain *c = calloc(1, sizeof *c);
     void **tail = &c->f2.pNext;
@@ -340,10 +346,12 @@ static int create_device(void) {
     if (g_vk.xfer_family != g_vk.gfx_family) vkGetDeviceQueue(g_vk.device, g_vk.xfer_family, 0, &g_vk.xfer_queue);
     else { g_vk.xfer_queue = g_vk.gfx_queue; g_vk.xfer_shared = 1; }
 
-    VkPhysicalDeviceExternalMemoryHostPropertiesEXT emh = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
-    VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &emh};
-    vkGetPhysicalDeviceProperties2(g_vk.phys, &p2);
-    g_vk.min_imported_host_alignment = (uint32_t)emh.minImportedHostPointerAlignment;
+    if (g_vk.has_external_memory_host) {
+        VkPhysicalDeviceExternalMemoryHostPropertiesEXT emh = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+        VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &emh};
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &p2);
+        g_vk.min_imported_host_alignment = (uint32_t)emh.minImportedHostPointerAlignment;
+    }
     vk_caps_init(&g_vk);
 
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.device, .instance = g_vk.instance,

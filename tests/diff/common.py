@@ -3,6 +3,8 @@
 Adapted from LAS Recomp tools/test_lift.py and tools/test_simd.py @ da35b83 (MIT, Copyright (c) 2026 Peiikai).
 """
 import os
+import platform
+import shlex
 import shutil
 import struct
 import subprocess
@@ -191,9 +193,44 @@ def compiler():
     return shutil.which('clang') or 'clang'
 
 
+def compiler_cmd():
+    """The C compiler as an argument list: $CC split like a shell command, so a cross run can name the target and its
+    sysroot (CC='clang --target=aarch64-linux-gnu --sysroot=DIR'), else compiler()."""
+    cc = os.environ.get('CC')
+    return shlex.split(cc, posix=os.name != 'nt') if cc else [compiler()]
+
+
+def target_arch():
+    """'x86_64' or 'aarch64': the architecture the tests compile for. $TOTK_TEST_ARCH, else the --target of $CC,
+    else the host's."""
+    arch = os.environ.get('TOTK_TEST_ARCH', '')
+    if not arch:
+        for a in compiler_cmd()[1:]:
+            if a.startswith('--target='):
+                arch = a.split('=', 1)[1].split('-')[0]
+    arch = (arch or platform.machine()).lower()
+    return {'amd64': 'x86_64', 'x64': 'x86_64', 'arm64': 'aarch64'}.get(arch, arch)
+
+
+# The code level the tests build for, as tools/build_game.py CPU_LEVELS builds the game by default: x86-64-v3, and on
+# aarch64 the 'a64' level with the generated code's register reservation (x18, runtime/kernel.c kern_ap_stub).
+DEFAULT_CFLAGS = {'x86_64': '-march=x86-64-v3',
+                  'aarch64': '-march=armv8.2-a+lse+rcpc+dotprod -fsigned-char -ffixed-x18'}
+
+
+def default_cflags():
+    return DEFAULT_CFLAGS.get(target_arch(), '')
+
+
+def run_prefix():
+    """$TOTK_TEST_RUN split like a shell command: what runs a test program built for another architecture, e.g.
+    'qemu-aarch64 -L SYSROOT'. Empty: the program runs directly."""
+    return shlex.split(os.environ.get('TOTK_TEST_RUN', ''), posix=os.name != 'nt')
+
+
 def build_harness(work, bodies, jobs, cflags):
     """Compile one C function per test body plus harness.c into work/harness[.exe]."""
-    cc = compiler()
+    cc = compiler_cmd()
     env = dict(os.environ)
     if os.name == 'nt' and MSYS_BIN.exists():
         env['PATH'] = str(MSYS_BIN) + os.pathsep + env.get('PATH', '')
@@ -219,11 +256,11 @@ def build_harness(work, bodies, jobs, cflags):
     for s in srcs:
         o = work / (s.stem + '.o')
         objs.append(o)
-        procs.append(subprocess.Popen([cc] + flags + ['-c', str(s), '-o', str(o)], env=env))
+        procs.append(subprocess.Popen(cc + flags + ['-c', str(s), '-o', str(o)], env=env))
     if any(p.wait() for p in procs):
         raise SystemExit('compile failed')
     exe = work / ('harness.exe' if os.name == 'nt' else 'harness')
-    subprocess.check_call([cc, '-fuse-ld=lld', '-o', str(exe)] + [str(o) for o in objs], env=env)
+    subprocess.check_call(cc + ['-fuse-ld=lld', '-o', str(exe)] + [str(o) for o in objs], env=env)
     return exe
 
 
@@ -243,7 +280,7 @@ def run_harness(exe, work, buf0, cases, images, stubs=False):
         f.write(buf0)
     write_cases(work / 'cases.bin', cases, stubs)
     out = work / 'out.bin'
-    args = [str(exe), str(work / 'buf.bin'), str(work / 'cases.bin'), str(out)]
+    args = run_prefix() + [str(exe), str(work / 'buf.bin'), str(work / 'cases.bin'), str(out)]
     for base, path in images:
         args += [str(path), f'{base:x}']
     p = subprocess.run(args, capture_output=True)

@@ -12,5 +12,6 @@
   <ItemGroup>
     <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj" />
     <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Common/Ryujinx.Common.csproj" />
+    <NativeLibrary Include="$(NativeAotCompatObject)" Condition="'$(NativeAotCompatObject)' != ''" />
   </ItemGroup>
 </Project>

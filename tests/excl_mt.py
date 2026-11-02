@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'diff'))
-from common import MSYS_BIN, ROOT, compiler  # noqa: E402
+from common import MSYS_BIN, ROOT, compiler_cmd, default_cflags, run_prefix  # noqa: E402
 
 SRC = r'''
 #include <pthread.h>
@@ -138,9 +138,10 @@ def main():
         src = Path(tmp) / 'excl_mt.c'
         exe = Path(tmp) / ('excl_mt.exe' if os.name == 'nt' else 'excl_mt')
         src.write_text(SRC)
-        subprocess.check_call([compiler(), '-O2', '-march=x86-64-v3', '-fno-strict-aliasing', '-I', str(args.runtime),
-                               str(src), '-o', str(exe), '-lpthread'], env=env)
-        return subprocess.run([str(exe), str(args.threads), str(args.iters)], env=env).returncode
+        cmd = compiler_cmd() + ['-O2', '-fuse-ld=lld', *default_cflags().split(), '-fno-strict-aliasing', '-I',
+                                str(args.runtime), str(src), '-o', str(exe), '-lpthread']
+        subprocess.check_call(cmd, env=env)
+        return subprocess.run(run_prefix() + [str(exe), str(args.threads), str(args.iters)], env=env).returncode
 
 
 if __name__ == '__main__':

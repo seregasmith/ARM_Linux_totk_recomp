@@ -14,6 +14,7 @@
 #include <sched.h>
 #include <signal.h>
 #include <spawn.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -191,8 +192,19 @@ enum { INTR_IDLE, INTR_REQ, INTR_STOPPED, INTR_GO };
 struct PlatIntr {
     pthread_t pt;
     volatile int32_t state;
-    uint64_t rip, rsp, to;
+    uint64_t rip, rsp, to;   // the interrupted pc and sp (rip, rsp on x86-64), and where to resume
 };
+
+// The program counter and stack pointer of a signal's interrupted context.
+#if defined(__x86_64__)
+#define UC_PC(u) ((u)->uc_mcontext.gregs[REG_RIP])
+#define UC_SP(u) ((u)->uc_mcontext.gregs[REG_RSP])
+#elif defined(__aarch64__)
+#define UC_PC(u) ((u)->uc_mcontext.pc)
+#define UC_SP(u) ((u)->uc_mcontext.sp)
+#else
+#error "platform/linux.c: no signal context layout for this architecture"
+#endif
 
 static __thread PlatIntr *intr_me;
 static int intr_sig;
@@ -202,12 +214,12 @@ static void intr_handler(int sig, siginfo_t *si, void *uc) {
     PlatIntr *t = intr_me;
     ucontext_t *u = uc;
     if (!t) return;
-    t->rip = (uint64_t)u->uc_mcontext.gregs[REG_RIP];
-    t->rsp = (uint64_t)u->uc_mcontext.gregs[REG_RSP];
+    t->rip = (uint64_t)UC_PC(u);
+    t->rsp = (uint64_t)UC_SP(u);
     int32_t req = INTR_REQ;
     if (!__atomic_compare_exchange_n(&t->state, &req, INTR_STOPPED, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
     while (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != INTR_GO) plat_pause();
-    if (t->to) u->uc_mcontext.gregs[REG_RIP] = (greg_t)t->to;
+    if (t->to) UC_PC(u) = (__typeof__(UC_PC(u)))t->to;
     __atomic_store_n(&t->state, INTR_IDLE, __ATOMIC_RELEASE);
 }
 
@@ -266,9 +278,10 @@ int plat_intr_resume(PlatIntr *t, uint64_t to) {
 }
 
 // ---- fibers: a stack switch of our own. glibc's swapcontext saves and restores the signal mask with a system call
-// on every switch, and the game switches fibers often. fiber_swap saves the callee-saved registers, the MXCSR and the
-// x87 control word on the current stack, stores the stack pointer in *save and loads the other one. A new fiber's
-// stack is laid out as fiber_swap leaves one, returning into fiber_entry, which calls fn(arg) (r12 and r13).
+// on every switch, and the game switches fibers often. fiber_swap saves the callee-saved registers and the FP control
+// (x86-64: MXCSR and the x87 control word; AArch64: FPCR) on the current stack, stores the stack pointer in *save and
+// loads the other one. A new fiber's stack is laid out as fiber_swap leaves one, returning into fiber_entry, which
+// calls fn(arg) (x86-64: r12 and r13; AArch64: x19 and x20).
 struct PlatFiber {
     void *sp;
     void *stack;   // mapped stack (NULL for a thread's own context)
@@ -277,6 +290,7 @@ struct PlatFiber {
 
 void plat_fiber_swap(void **save, void *load);
 void plat_fiber_entry(void);
+#if defined(__x86_64__)
 __asm__(".text\n"
         ".globl plat_fiber_swap\n"
         ".type plat_fiber_swap, @function\n"
@@ -314,6 +328,61 @@ __asm__(".text\n"
         "    callq *%r12\n"
         "    ud2\n"
         ".size plat_fiber_entry, .-plat_fiber_entry\n");
+#elif defined(__aarch64__)
+// The frame, 176 bytes from sp: x19-x28 (0-79), x29 and x30 (80), d8-d15 (96-159), FPCR (160). FPCR is written back
+// only when it differs, as an msr can be slow.
+__asm__(".text\n"
+        ".globl plat_fiber_swap\n"
+        ".type plat_fiber_swap, %function\n"
+        ".p2align 4\n"
+        "plat_fiber_swap:\n"
+        "    .cfi_startproc\n"
+        "    sub sp, sp, #176\n"
+        "    stp x19, x20, [sp, #0]\n"
+        "    stp x21, x22, [sp, #16]\n"
+        "    stp x23, x24, [sp, #32]\n"
+        "    stp x25, x26, [sp, #48]\n"
+        "    stp x27, x28, [sp, #64]\n"
+        "    stp x29, x30, [sp, #80]\n"
+        "    stp d8, d9, [sp, #96]\n"
+        "    stp d10, d11, [sp, #112]\n"
+        "    stp d12, d13, [sp, #128]\n"
+        "    stp d14, d15, [sp, #144]\n"
+        "    mrs x9, fpcr\n"
+        "    str x9, [sp, #160]\n"
+        "    mov x10, sp\n"
+        "    str x10, [x0]\n"
+        "    mov sp, x1\n"
+        "    ldr x10, [sp, #160]\n"
+        "    cmp x9, x10\n"
+        "    b.eq 1f\n"
+        "    msr fpcr, x10\n"
+        "1:\n"
+        "    ldp d14, d15, [sp, #144]\n"
+        "    ldp d12, d13, [sp, #128]\n"
+        "    ldp d10, d11, [sp, #112]\n"
+        "    ldp d8, d9, [sp, #96]\n"
+        "    ldp x29, x30, [sp, #80]\n"
+        "    ldp x27, x28, [sp, #64]\n"
+        "    ldp x25, x26, [sp, #48]\n"
+        "    ldp x23, x24, [sp, #32]\n"
+        "    ldp x21, x22, [sp, #16]\n"
+        "    ldp x19, x20, [sp, #0]\n"
+        "    add sp, sp, #176\n"
+        "    ret\n"
+        "    .cfi_endproc\n"
+        ".size plat_fiber_swap, .-plat_fiber_swap\n"
+        ".globl plat_fiber_entry\n"
+        ".type plat_fiber_entry, %function\n"
+        ".p2align 4\n"
+        "plat_fiber_entry:\n"
+        "    mov x0, x20\n"
+        "    blr x19\n"
+        "    brk #0\n"
+        ".size plat_fiber_entry, .-plat_fiber_entry\n");
+#else
+#error "platform/linux.c: no fiber switch for this architecture"
+#endif
 
 static __thread PlatFiber *fiber_cur;
 static __thread PlatFiber fiber_own;
@@ -338,6 +407,7 @@ PlatFiber *plat_fiber_new(size_t stack, void (*fn)(void *arg), void *arg) {
     mprotect(m, 4096, PROT_NONE);
     f->stack = m, f->size = stack;
     uint64_t *top = (uint64_t *)(((uintptr_t)m + stack) & ~(uintptr_t)15);
+#if defined(__x86_64__)
     uint64_t *sp = top - 10;   // fpu state (2 words), r15, r14, r13, r12, rbx, rbp, return address, padding
     sp[0] = 0x037f;            // x87 control word: the default
     sp[1] = 0x1f80;            // MXCSR: the default
@@ -347,6 +417,13 @@ PlatFiber *plat_fiber_new(size_t stack, void (*fn)(void *arg), void *arg) {
     sp[6] = sp[7] = 0;         // rbx, rbp
     sp[8] = (uint64_t)(uintptr_t)plat_fiber_entry;
     sp[9] = 0;
+#else
+    uint64_t *sp = top - 22;   // plat_fiber_swap's frame: x19-x28, x29, x30, d8-d15, FPCR (the default, 0), padding
+    memset(sp, 0, 22 * sizeof *sp);
+    sp[0] = (uint64_t)(uintptr_t)fn;    // x19
+    sp[1] = (uint64_t)(uintptr_t)arg;   // x20
+    sp[11] = (uint64_t)(uintptr_t)plat_fiber_entry;   // x30: plat_fiber_swap returns into it
+#endif
     f->sp = sp;
     return f;
 }
@@ -802,6 +879,21 @@ enum { PS_FREE, PS_RESERVED, PS_NONE, PS_READ, PS_RW };   // PS_NONE.. are commi
 static uint8_t *pstate;
 static int ww_fd = -1, pm_fd = -1;   // userfaultfd and /proc/self/pagemap; -1 when write watch is unavailable
 static PlatMutex vm_lock = PLAT_MUTEX_INIT;
+static char ww_problem[192];          // the first write-watch failure (plat_mem_watch_problem); set once
+
+// Keeps the first failure for plat_mem_watch_problem and prints it, as the log is not open this early.
+static void ww_fail(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void ww_fail(const char *fmt, ...) {
+    static int once;
+    if (__atomic_exchange_n(&once, 1, __ATOMIC_ACQ_REL)) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(ww_problem, sizeof ww_problem, fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "platform: written memory is not tracked: %s\n", ww_problem);
+}
+
+const char *plat_mem_watch_problem(void) { return __atomic_load_n(&ww_problem[0], __ATOMIC_ACQUIRE) ? ww_problem : NULL; }
 
 static void ps_set(uint64_t addr, uint64_t n, uint8_t v) {
     if (addr < PS_LIMIT) memset(pstate + addr / PG, v, (size_t)((n + PG - 1) / PG));
@@ -812,13 +904,13 @@ static void ww_open(void) {
     struct uffdio_api api = {.api = UFFD_API,
                              .features = UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED};
     if (fd < 0 || ioctl(fd, UFFDIO_API, &api)) {
-        fprintf(stderr, "platform: no asynchronous userfaultfd write protection (%s): written memory is not tracked\n",
-                strerror(errno));
+        ww_fail("%s (%s)", fd < 0 ? "userfaultfd" : "userfaultfd: asynchronous write protection", strerror(errno));
         if (fd >= 0) close(fd);
         return;
     }
     pm_fd = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
     if (pm_fd < 0) {
+        ww_fail("/proc/self/pagemap (%s)", strerror(errno));
         close(fd);
         return;
     }
@@ -845,7 +937,7 @@ int plat_mem_reserve(uint64_t addr, uint64_t n, int watch) {
         if (watch) madvise(p, n, MADV_NOHUGEPAGE);
         struct uffdio_register reg = {.range = {addr, n}, .mode = UFFDIO_REGISTER_MODE_WP};
         if (watch && ww_fd >= 0 && ioctl(ww_fd, UFFDIO_REGISTER, &reg))
-            fprintf(stderr, "platform: write watch over %#llx+%#llx failed (%s)\n", (unsigned long long)addr,
+            ww_fail("UFFDIO_REGISTER write protection over %#llx+%#llx (%s)", (unsigned long long)addr,
                     (unsigned long long)n, strerror(errno));
     }
     plat_mutex_unlock(&vm_lock);
@@ -906,7 +998,11 @@ uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t m
                                   .category_anyof_mask = PAGE_IS_PRESENT | PAGE_IS_SWAPPED,
                                   .return_mask = PAGE_IS_WRITTEN};
         long k = ioctl(pm_fd, PAGEMAP_SCAN, &arg);
-        if (k < 0) return UINT64_MAX;
+        if (k < 0) {
+            ww_fail("PAGEMAP_SCAN over %#llx+%#llx (%s)", (unsigned long long)at, (unsigned long long)(end - at),
+                    strerror(errno));
+            return UINT64_MAX;
+        }
         for (long i = 0; i < k; i++)
             for (uint64_t p = r[i].start; p < r[i].end && got < max; p += PG) pages[got++] = p;
         if (arg.walk_end <= at) break;
@@ -915,24 +1011,54 @@ uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t m
     return got;
 }
 
-// One handler for the synchronous faults. A SIGSEGV whose page-fault error code has the write bit set goes to the
-// write-fault hook first (memory.c thaws a frozen region); a fault in this executable's code then goes to the crash
-// hook (main.c); anything else gets the default action. Runs on the thread's signal stack.
+// One handler for the synchronous faults. A SIGSEGV that was a write goes to the write-fault hook first (memory.c
+// thaws a frozen region); a fault in this executable's code then goes to the crash hook (main.c); anything else gets
+// the default action. Runs on the thread's signal stack.
 static int (*fault_hook)(uint64_t addr);
 static void (*crash_fn)(const PlatCrash *c);
 
+// The kind of memory access that faulted: FAULT_WRITE, FAULT_EXEC or 0 (a read).
+enum { FAULT_WRITE = 1, FAULT_EXEC = 2 };
+#if defined(__x86_64__)
+// The page-fault error code: bit 1 write, bit 4 instruction fetch.
+static int fault_kind(const ucontext_t *u) {
+    long err = u->uc_mcontext.gregs[REG_ERR];
+    return (err & 16) ? FAULT_EXEC : (err & 2) ? FAULT_WRITE : 0;
+}
+#elif defined(__aarch64__)
+// The ESR the kernel puts into the signal frame (an esr_context record among the __reserved ones) for an abort: the
+// exception class says data or instruction abort, WnR a write (atomic read-modify-writes count as writes), CM a cache
+// maintenance operation, which is not one.
+static int fault_kind(const ucontext_t *u) {
+    const struct { uint32_t magic, size; } *h = (const void *)u->uc_mcontext.__reserved;
+    const char *end = (const char *)u->uc_mcontext.__reserved + sizeof u->uc_mcontext.__reserved;
+    while ((const char *)h + 8 <= end && h->magic && h->size >= 8) {
+        if (h->magic == 0x45535201u) {   // ESR_MAGIC
+            uint64_t esr;
+            memcpy(&esr, (const char *)h + 8, sizeof esr);
+            unsigned ec = (unsigned)(esr >> 26) & 0x3f;
+            if (ec == 0x20 || ec == 0x21) return FAULT_EXEC;   // instruction abort
+            if ((ec == 0x24 || ec == 0x25) && (esr & (1u << 6)) && !(esr & (1u << 8))) return FAULT_WRITE;
+            return 0;
+        }
+        h = (const void *)((const char *)h + h->size);
+    }
+    return 0;
+}
+#endif
+
 static void fault_handler(int sig, siginfo_t *si, void *uc) {
     ucontext_t *u = uc;
-    long err = u->uc_mcontext.gregs[REG_ERR];
-    if (sig == SIGSEGV && fault_hook && (err & 2) && fault_hook((uint64_t)(uintptr_t)si->si_addr)) return;
-    uintptr_t rip = (uintptr_t)u->uc_mcontext.gregs[REG_RIP];
+    int kind = sig == SIGSEGV || sig == SIGBUS ? fault_kind(u) : 0;
+    if (sig == SIGSEGV && fault_hook && kind == FAULT_WRITE && fault_hook((uint64_t)(uintptr_t)si->si_addr)) return;
+    uintptr_t rip = (uintptr_t)UC_PC(u);
     Dl_info at, self;
     if (crash_fn && dladdr((void *)rip, &at) && dladdr((void *)plat_crash_hook, &self) && at.dli_fbase == self.dli_fbase) {
         PlatCrash c = {sig == SIGSEGV ? "access violation" : sig == SIGBUS ? "bus error"
                        : sig == SIGILL ? "illegal instruction" : "arithmetic exception",
                        (uint32_t)sig, rip, rip - (uintptr_t)self.dli_fbase, -1, 0};
         if (sig == SIGSEGV || sig == SIGBUS)
-            c.access = (err & 16) ? 8 : (err & 2) ? 1 : 0, c.addr = (uint64_t)(uintptr_t)si->si_addr;
+            c.access = kind == FAULT_EXEC ? 8 : kind == FAULT_WRITE ? 1 : 0, c.addr = (uint64_t)(uintptr_t)si->si_addr;
         crash_fn(&c);
     }
     signal(sig, SIG_DFL);   // returns into the faulting instruction, which faults again with the default action

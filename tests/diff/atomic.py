@@ -13,7 +13,6 @@ Needs no game files. Usage: atomic.py [--cases K] [--seed S] [--jobs J]
 """
 import argparse
 import os
-import platform
 import random
 import struct
 import sys
@@ -23,7 +22,8 @@ import zlib
 import unicorn as uc
 from unicorn import arm64_const as A
 
-from common import BUF, BUF_SIZE, ROOT, Emu, build_harness, diff_state, dis, rand_fpcr, rand_v, rand_x, run_harness
+from common import BUF, BUF_SIZE, ROOT, Emu, build_harness, default_cflags, diff_state, dis, rand_fpcr, rand_v, \
+    rand_x, run_harness
 from lifter import Lifter
 
 BUF_MID = BUF + 0x10000
@@ -157,7 +157,7 @@ def main():
     ap.add_argument('--cases', type=int, default=64)
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4)
-    ap.add_argument('--cflags', default='-march=x86-64-v3' if platform.machine().lower() in ('amd64', 'x86_64') else '')
+    ap.add_argument('--cflags', default=default_cflags())
     args = ap.parse_args()
     r = random.Random(args.seed)
     t0 = time.time()

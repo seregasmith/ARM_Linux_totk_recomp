@@ -21,8 +21,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 EXE = '.exe' if os.name == 'nt' else ''
-# A Linux source build links the system's SDL3, Opus and libvpx: the other machine needs them installed
+# A Linux source build links the system's SDL3, Opus and libvpx: the other machine needs them installed. A build with
+# --deps (build_docker.sh, the release) links Opus and libvpx statically and finds a libSDL3.so.0 beside the exe first
+# ($ORIGIN): when the build directory has one, it goes into the folder too.
 DLLS = ('SDL3.dll', 'libopus-0.dll', 'libiconv-2.dll') if os.name == 'nt' else ()
+BESIDE = () if os.name == 'nt' else ('libSDL3.so.0',)
 # Prepared state next to the exe: translator answers, programs, the prepared list, pipeline cache and its keys, and the
 # variant lists `totk.exe --prepare-shaders` reads (the driver keys its library cache by exe path, so each copy runs it).
 STATE = ('romfs-index.bin', 'pipeline-cache.bin', 'pipeline-keys.bin', 'shader-answers.bin', 'shader-programs.bin',
@@ -68,7 +71,9 @@ def main():
     fonts = a.extracted.resolve().parent / 'firmware' / 'shared-fonts'
     exefs = a.extracted.resolve() / 'exefs'
     romfs = a.extracted.resolve() / 'romfs' / 'romfs.bin'
-    need = [exe, a.xlate, exefs, fonts, build / 'romfs-patches'] + [build / d for d in DLLS] + [build / 'romfs-index.bin']
+    # The shared fonts come from a firmware (tools/extract_fonts.py): without them the game lacks the Chinese and Korean
+    # glyphs, as an install without a firmware folder does.
+    need = [exe, a.xlate, exefs, build / 'romfs-patches'] + [build / d for d in DLLS] + [build / 'romfs-index.bin']
     if a.with_romfs:
         need.append(romfs)
     missing = [str(p) for p in need if not p.exists()]
@@ -83,6 +88,9 @@ def main():
     copy(exe, out / f'totk{EXE}')
     for d in DLLS:
         copy(build / d, out / d)
+    for d in BESIDE:
+        if (build / d).exists():
+            copy(build / d, out / d)
     copy(a.xlate, out / f'totk_xlate{EXE}')
     idf = a.xlate.with_suffix('.id')
     if idf.exists():
@@ -97,7 +105,10 @@ def main():
         if (build / name).is_dir():
             n += copy_tree(build / name, out / name)
     n += copy_tree(exefs, out / 'exefs')
-    n += copy_tree(fonts, out / 'shared-fonts')
+    if fonts.is_dir():
+        n += copy_tree(fonts, out / 'shared-fonts')
+    else:
+        print(f'package_build: no {fonts}: no shared fonts (Chinese and Korean text needs them; tools/extract_fonts.py)')
     if not a.no_shader_cache and (build / 'shader-cache').is_dir():
         n += copy_tree(build / 'shader-cache', out / 'shader-cache')
     (out / 'profile').mkdir(exist_ok=True)

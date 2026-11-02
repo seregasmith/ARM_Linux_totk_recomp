@@ -14,7 +14,9 @@ import sys
 from pathlib import Path
 
 # Per-file allowlist of shared files that still use Win32, with the reason. Empty: every shared file is portable.
-ALLOWED = {}
+ALLOWED = {
+    "vk_dlaa.c": "the NGX implementation is guarded by _WIN32; non-Windows builds use the stub below",
+}
 
 INCLUDE = re.compile(r'^\s*#\s*include\s*[<"](windows|winsock2|ws2tcpip|synchapi|memoryapi|processthreadsapi|'
                      r'fileapi|handleapi|libloaderapi|winbase|winnt)\.h[>"]', re.M)

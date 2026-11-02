@@ -39,7 +39,9 @@ void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) __attribute__((noreturn));
 void rt_udf(Cpu *c, uint64_t pc) __attribute__((noreturn));
 uint64_t rt_ticks(void);
 
-#if defined(__aarch64__)
+#if defined(__aarch64__) && defined(RT_SIMD_ASM)
+// Code lifted with --simd=asm (LAS Recomp's AArch64 passthrough, recomp/lifter.py emit_asm_batch) runs the guest's
+// FP/SIMD instructions themselves, so the host FPCR/FPSR are the guest's.
 static inline uint64_t rt_get_fpcr(void) { uint64_t v; __asm__ volatile("mrs %0, fpcr" : "=r"(v)); return v; }
 static inline uint64_t rt_get_fpsr(void) { uint64_t v; __asm__ volatile("mrs %0, fpsr" : "=r"(v)); return v; }
 static inline void rt_set_fpcr(uint64_t v) { __asm__ volatile("msr fpcr, %0" :: "r"(v)); }
@@ -52,15 +54,27 @@ static inline uint64_t rt_get_fpcr(void) { return 0; }
 static inline uint64_t rt_get_fpsr(void) { return 0; }
 static inline void rt_set_fpcr(uint64_t v) { (void)v; }
 static inline void rt_set_fpsr(uint64_t v) { (void)v; }
-// The MXCSR of a host thread running guest code mirrors c->fpcr: FTZ|DAZ = FPCR.FZ, RC = nearest (FPCR.RMode takes
-// the slow paths of runtime/simd.h, which switch RC around one operation). The FP helpers rely on it without checking,
-// so it is set wherever FPCR or the host FP context changes: MSR FPCR (recomp/lifter.py), rt_call (thread and fiber
-// entry, host code calling guest code), fiber resume (runtime/kernel.c fiber_resumed; fibers keep their own MXCSR).
+// The host FP control of a thread running guest code mirrors c->fpcr: flush-to-zero = FPCR.FZ, rounding = nearest
+// (FPCR.RMode takes the slow paths of runtime/simd.h, which switch the rounding around one operation). The FP helpers
+// rely on it without checking, so it is set wherever FPCR or the host FP context changes: MSR FPCR
+// (recomp/lifter.py), rt_call (thread and fiber entry, host code calling guest code), fiber resume (runtime/kernel.c
+// fiber_resumed; fibers keep their own FP control).
+#if defined(__aarch64__)
+// AArch64: the host FPCR's FZ is the guest's own flush (inputs and results); DN stays off and the rounding mode at
+// nearest, as the lowering computes ARM's NaN and rounding rules itself.
+static inline void rt_fpcr_sync(const Cpu *c) {
+    uint64_t cur;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(cur) :: "memory");
+    uint64_t want = (cur & ~(uint64_t)(0xFu << 22)) | (c->fpcr & (1u << 24));   // AHP 26, DN 25, FZ 24, RMode 22-23
+    if (cur != want) __asm__ volatile("msr fpcr, %0" :: "r"(want) : "memory");
+}
+#else
 static inline void rt_fpcr_sync(const Cpu *c) {
     unsigned cur = __builtin_ia32_stmxcsr();
     unsigned want = (cur & ~0xE040u) | (c->fpcr & (1u << 24) ? 0x8040u : 0);   // FTZ 0x8000, DAZ 0x40, RC 0x6000
     if (cur != want) __builtin_ia32_ldmxcsr(want);
 }
+#endif
 #endif
 
 // ---- memory: guest addresses are host addresses
@@ -109,7 +123,8 @@ EXCL(16, uint16_t)
 EXCL(32, uint32_t)
 EXCL(64, uint64_t)
 
-// Exclusive pair of two X registers: one 16-byte-aligned 128-bit access (cmpxchg16b; x86-64-v2 has CX16).
+// Exclusive pair of two X registers: one 16-byte-aligned 128-bit access (cmpxchg16b on x86-64, which x86-64-v2 has;
+// CASP with the AArch64 LSE atomics).
 // A pair of two W registers is a 64-bit exclusive and uses ldx64/stx64.
 static inline __uint128_t ldxp128(Cpu *c, uint64_t a) {
     __uint128_t v = __atomic_load_n((__uint128_t *)(uintptr_t)a, __ATOMIC_ACQUIRE);
@@ -354,8 +369,8 @@ static inline uint32_t sdiv32(uint32_t a, uint32_t b) {
     return (uint32_t)((int32_t)a / (int32_t)b);
 }
 
-// Portable FP/SIMD helpers for code lifted with --simd=c (default off AArch64; gen.py includes simd.h itself
-// in that mode, so AArch64 hosts can build it too).
-#if !defined(__cplusplus) && !defined(__aarch64__)
+// Portable FP/SIMD helpers for code lifted with --simd=c, the lowering on every host (gen.py includes simd.h itself
+// as well). Only the --simd=asm passthrough (RT_SIMD_ASM) does without them.
+#if !defined(__cplusplus) && !defined(RT_SIMD_ASM)
 #include "simd.h"
 #endif

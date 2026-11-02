@@ -23,6 +23,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__aarch64__) && defined(__linux__)
+#include <sys/auxv.h>
+#endif
 
 #include "cfg.h"
 #include "host.h"
@@ -35,10 +38,11 @@
 unsigned rt_trace;
 
 // Log file. A game run whose stderr is not a file already (started from Explorer, a shortcut or a console) also
-// writes its log to logs\totk.log next to totk.exe, so a player has one to attach to a report; run_game.py and
-// `2> file` keep their own file. Each start moves the earlier logs to totk.1.log .. totk.4.log. A file stops at 64 MiB
-// (TOTK_TRACE can write that much). Lines from before log_open wait in a static buffer: mem_init runs first so that
-// nothing else lands in the guest address space, and an earlier open would put the CRT's heap there.
+// writes its log to logs\totk.log in cfg_data_dir (next to totk.exe unless TOTK_DATA_DIR names a folder), so a player
+// has one to attach to a report; run_game.py and `2> file` keep their own file. Each start moves the earlier logs to
+// totk.1.log .. totk.4.log. A file stops at 64 MiB (TOTK_TRACE can write that much). Lines from before log_open wait
+// in a static buffer: mem_init runs first so that nothing else lands in the guest address space, and an earlier open
+// would put the CRT's heap there.
 #define LOG_KEEP 5
 #define LOG_CAP (64ull << 20)
 enum { LOG_EARLY, LOG_FILE, LOG_OFF };
@@ -100,11 +104,7 @@ const char *rt_log_path(void) {
 static void log_open(int game) {
     char dir[PLAT_PATH_MAX * 3], from[PLAT_PATH_MAX * 3 + 16], to[PLAT_PATH_MAX * 3 + 16];
     char *cut = NULL;
-    if (game && !plat_stderr_path(dir, sizeof dir) && plat_exe_path(dir, sizeof dir)) {
-        cut = plat_last_sep(dir);
-        char *f = strrchr(dir, '/');
-        if (f > cut) cut = f;
-    }
+    if (game && !plat_stderr_path(dir, sizeof dir) && cfg_data_dir(dir, sizeof dir)) cut = dir + strlen(dir);
     if (cut && (size_t)(cut - dir) + sizeof "/logs" <= sizeof dir) {
         strcpy(cut, "/logs");
         plat_file_mkdir_p(dir);
@@ -261,12 +261,43 @@ static double now_s(void) { return (double)plat_now_ns() / 1e9; }
 static volatile int host_probe_hits;
 static void host_probe(Cpu *c) { host_probe_hits++; c->x[0] = 42; }
 
-// The instruction set build_game.py --cpu compiled for: v3 (AVX2/FMA/BMI2, the default) or v2 (SSE4.2/POPCNT).
+// The instruction set build_game.py --cpu compiled for (tools/build_game.py CPU_LEVELS). x86-64: 3 = v3
+// (AVX2/FMA/BMI2, the default), 2 = v2 (SSE4.2/POPCNT). AArch64: 1 = a64 (Armv8.2 with LSE, RCpc and the dot product,
+// the default), 2 = oryon (-mcpu=oryon-1: Armv8.6 features on top).
 #ifndef RT_CPU_LEVEL
+#if defined(__aarch64__)
+#define RT_CPU_LEVEL 1
+#else
 #define RT_CPU_LEVEL 3
+#endif
+#endif
+
+#if defined(__aarch64__)
+// AT_HWCAP and AT_HWCAP2 bits of the Linux arm64 ABI (uapi asm/hwcap.h), spelled out for older headers.
+enum { HWC_ASIMD = 1, HWC_ATOMICS = 8, HWC_LRCPC = 15, HWC_ASIMDDP = 20, HWC_USCAT = 25, HWC_ILRCPC = 26,
+       HWC_FLAGM = 27, HWC2_FLAGM2 = 7, HWC2_FRINT = 8, HWC2_I8MM = 13, HWC2_BF16 = 14 };
 #endif
 
 static void check_cpu(void) {
+#if defined(__aarch64__)
+#if defined(__linux__)
+    unsigned long hw = getauxval(AT_HWCAP), hw2 = getauxval(AT_HWCAP2);
+#else
+    unsigned long hw = ~0ul, hw2 = ~0ul;   // no auxiliary vector to ask: trust the build
+#endif
+#define HAS(word, bit) (((word) >> (bit)) & 1)
+    int ok = HAS(hw, HWC_ASIMD) && HAS(hw, HWC_ATOMICS) && HAS(hw, HWC_LRCPC) && HAS(hw, HWC_ASIMDDP);
+    (void)hw2;
+    printf("cpu: Armv8.2 + LSE, RCpc, dot product %s\n", ok ? "present" : "MISSING");
+    CHECK(ok, "the lifted code is built for Armv8.2 with LSE, RCpc and the dot product");
+#if RT_CPU_LEVEL >= 2
+    int v86 = HAS(hw, HWC_USCAT) && HAS(hw, HWC_ILRCPC) && HAS(hw, HWC_FLAGM) && HAS(hw2, HWC2_FLAGM2) &&
+              HAS(hw2, HWC2_FRINT) && HAS(hw2, HWC2_I8MM) && HAS(hw2, HWC2_BF16);
+    printf("cpu: Oryon level (LSE2, RCpc 2, FlagM 2, FRINT, I8MM, BF16) %s\n", v86 ? "present" : "MISSING");
+    CHECK(v86, "the lifted code is built for -mcpu=oryon-1");
+#endif
+#undef HAS
+#else
     __builtin_cpu_init();
 #if RT_CPU_LEVEL >= 3
     int ok = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2");
@@ -276,6 +307,7 @@ static void check_cpu(void) {
     int ok = __builtin_cpu_supports("sse4.2") && __builtin_cpu_supports("popcnt");
     printf("cpu: x86-64-v2 (SSE4.2, POPCNT) %s\n", ok ? "present" : "MISSING");
     CHECK(ok, "the lifted code is built for x86-64-v2");
+#endif
 #endif
 }
 
@@ -449,7 +481,8 @@ static int usage(const char *argv0) {
 
 // Paths for a copied folder (tools/package_build.py). Per path: TOTK_EXEFS, TOTK_ROMFS, TOTK_PROFILE_DIR, else the
 // folder next to totk.exe (exefs with main.npdm, romfs with romfs.bin, any profile folder) if it is there, else the
-// path baked in at build time. A relative value is relative to totk.exe's folder.
+// path baked in at build time. A relative value is relative to totk.exe's folder. With TOTK_DATA_DIR (cfg_data_dir)
+// the profile is <TOTK_DATA_DIR>/profile unless TOTK_PROFILE_DIR names one: the saves go with the other written files.
 static char pp_exefs[PLAT_PATH_MAX * 2], pp_romfs[PLAT_PATH_MAX * 2], pp_profile[PLAT_PATH_MAX * 2];
 
 static const char *portable_path(const char *dir, const char *var, const char *sub, const char *must, char *out, size_t cap,
@@ -477,6 +510,12 @@ static void portable_paths(RtConfig *c) {
     c->exefs = portable_path(exe, "TOTK_EXEFS", "exefs", "main.npdm", pp_exefs, sizeof pp_exefs, c->exefs);
     c->romfs = portable_path(exe, "TOTK_ROMFS", "romfs", "romfs.bin", pp_romfs, sizeof pp_romfs, c->romfs);
     c->profile = portable_path(exe, "TOTK_PROFILE_DIR", "profile", NULL, pp_profile, sizeof pp_profile, c->profile);
+    const char *own = cfg_get("TOTK_PROFILE_DIR");
+    char data[PLAT_PATH_MAX * 2];
+    if ((!own || !*own) && cfg_data_dir(data, sizeof data) == 2) {
+        snprintf(pp_profile, sizeof pp_profile, "%s/profile", data);
+        c->profile = pp_profile;
+    }
 }
 
 int main(int argc, char **argv) {

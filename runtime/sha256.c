@@ -1,12 +1,20 @@
-// SHA-256 (FIPS 180-4). The block function has two forms: one on the x86 SHA extensions (SHA-NI: Intel since Ice Lake
-// and Goldmont, AMD since Zen), which hashes the RomFS image at about the speed of a disk read, and portable C for CPUs
-// without them. sha256_selftest in the probes compares both against the FIPS test vectors.
+// SHA-256 (FIPS 180-4). The block function has three forms: one on the x86 SHA extensions (SHA-NI: Intel since Ice
+// Lake and Goldmont, AMD since Zen), one on the Armv8 SHA-256 instructions (every Snapdragon, Apple and Cortex-A76-class
+// core), which hash the RomFS image at about the speed of a disk read, and portable C for CPUs without them.
 #include "sha256.h"
 
 #include <string.h>
 
 #if defined(__x86_64__)
 #include <immintrin.h>
+#elif defined(__aarch64__)
+#include <arm_neon.h>
+#if defined(__linux__)
+#include <sys/auxv.h>
+#ifndef HWCAP_SHA2
+#define HWCAP_SHA2 (1 << 6)
+#endif
+#endif
 #endif
 
 static const uint32_t K[64] = {
@@ -75,11 +83,49 @@ __attribute__((target("sha,sse4.1"))) static void blocks_ni(uint32_t h[8], const
 }
 #endif
 
+#if defined(__aarch64__)
+// The state lives in two registers in its own order (ABCD, EFGH). Each group of four rounds adds the round constants
+// to four message words and runs sha256h and sha256h2 on them; the schedule for words 16..63 is
+// su1(su0(W[t-16..], W[t-12..]), W[t-8..], W[t-4..]), made four groups ahead of its use.
+__attribute__((target("sha2"))) static void blocks_arm(uint32_t h[8], const uint8_t *p, size_t n) {
+    uint32x4_t s0 = vld1q_u32(&h[0]), s1 = vld1q_u32(&h[4]);
+    for (; n; n--, p += 64) {
+        uint32x4_t a0 = s0, e0 = s1, m[4];
+        for (int g = 0; g < 4; g++) m[g] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(p + 16 * g)));
+        for (int g = 0; g < 16; g++) {
+            uint32x4_t k = vaddq_u32(m[g & 3], vld1q_u32(&K[4 * g])), t = s0;
+            s0 = vsha256hq_u32(s0, s1, k);
+            s1 = vsha256h2q_u32(s1, t, k);
+            if (g < 12)
+                m[g & 3] = vsha256su1q_u32(vsha256su0q_u32(m[g & 3], m[(g + 1) & 3]), m[(g + 2) & 3], m[(g + 3) & 3]);
+        }
+        s0 = vaddq_u32(s0, a0);
+        s1 = vaddq_u32(s1, e0);
+    }
+    vst1q_u32(&h[0], s0);
+    vst1q_u32(&h[4], s1);
+}
+
+static int has_sha2(void) {
+#if defined(__linux__)
+    return (getauxval(AT_HWCAP) & HWCAP_SHA2) != 0;
+#elif defined(__ARM_FEATURE_SHA2)
+    return 1;
+#else
+    return 0;
+#endif
+}
+#endif
+
 static void blocks(uint32_t h[8], const uint8_t *p, size_t n) {
 #if defined(__x86_64__)
     static int ni = -1;
     if (ni < 0) ni = __builtin_cpu_supports("sha") && __builtin_cpu_supports("sse4.1");
     if (ni) return blocks_ni(h, p, n);
+#elif defined(__aarch64__)
+    static int arm = -1;
+    if (arm < 0) arm = has_sha2();
+    if (arm) return blocks_arm(h, p, n);
 #endif
     blocks_c(h, p, n);
 }

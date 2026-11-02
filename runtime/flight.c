@@ -81,7 +81,9 @@ void flight_init(void) {
     }
     const char *d = cfg_get("TOTK_FLIGHT_DIR");
     char tmp[PLAT_PATH_MAX];
+    char data[PLAT_PATH_MAX - 16];
     if (d && *d) snprintf(tmp, sizeof tmp, "%s", d);
+    else if (cfg_data_dir(data, sizeof data) == 2) snprintf(tmp, sizeof tmp, "%s/flight", data);   // TOTK_DATA_DIR
     else {   // <exe dir>/../flight: build/flight for build/v121*/totk.exe
         char *slash = plat_exe_path(tmp, sizeof tmp) ? plat_last_sep(tmp) : NULL;
         if (slash) snprintf(slash, sizeof tmp - (size_t)(slash - tmp), "/../flight");

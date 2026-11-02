@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -198,6 +199,17 @@ MERGE_PHASES = {'copy': '  copying the base and update Program NCAs', 'merge': '
                 'index': '  hashing and indexing the merged image'}
 
 
+def exit_text(code):
+    """How a process ended, for a message: its exit code, or the signal that ended it (subprocess reports -N)."""
+    if code >= 0:
+        return f'exit code {code}'
+    try:
+        name = signal.Signals(-code).name
+    except ValueError:
+        name = f'signal {-code}'
+    return f'ended by {name}' + (', as when memory runs out (the kernel\'s out-of-memory killer)' if name == 'SIGKILL' else '')
+
+
 def run_hactool(command, environment):
     """(exit code, stdout and stderr with long hex strings removed). hactool prints UTF-8 (its manifest)."""
     completed = subprocess.run(command, env=environment, capture_output=True, encoding='utf-8', errors='replace')
@@ -258,12 +270,13 @@ def merge_update_romfs(base, update, keys_path, hactool, output, logs, phase=lam
                    f'--basenca={base_nca}', f'--section{sections[0]}={result / "romfs.bin"}', str(update_nca)]
         environment = dict(os.environ, MNG_TITLE_KEYS=str(title_keys))
         code, log = run_hactool(command, environment)
-        log_path.write_text(log, encoding='utf-8')
+        log_path.write_text(f'{log}\n---- hactool: {exit_text(code)} ----\n', encoding='utf-8')
         checked = '\n'.join(line for line in log.splitlines() if not UNSIGNED.match(line))
         if HACTOOL_HASH_FAIL.search(checked):
             phase('diagnose')
             raise damaged_merge_input(hactool, hactool_keys, environment, base, update, base_nca, log_path)
-        require(code == 0 and not HACTOOL_ERROR.search(checked), f'hactool merge failed; see {shown(log_path)}')
+        require(code == 0 and not HACTOOL_ERROR.search(checked),
+                f'hactool merge failed ({exit_text(code)}); see {shown(log_path)}')
         require(all(re.search(rf'Level {i} \(GOOD\)', log) for i in range(6)), 'hactool did not verify all six IVFC levels')
         image = result / 'romfs.bin'
         phase('index')

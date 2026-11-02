@@ -14,7 +14,6 @@ Usage: simd.py [--encodings N] [--cases K] [--seed S] [--jobs J] [--no-validity]
 import argparse
 import functools
 import os
-import platform
 import random
 import struct
 import sys
@@ -25,8 +24,8 @@ from collections import Counter, defaultdict
 import unicorn as uc
 from unicorn import arm64_const as A
 
-from common import BUF, BUF_SIZE, ROOT, UC_INVALID, Emu, build_harness, diff_state, dis, mnemonic, rand_fpcr, \
-    rand_v, rand_x, run_harness
+from common import BUF, BUF_SIZE, ROOT, UC_INVALID, Emu, build_harness, default_cflags, diff_state, dis, mnemonic, \
+    rand_fpcr, rand_v, rand_x, run_harness
 from lifter import Lifter, Unsupported
 
 print = functools.partial(print, flush=True)
@@ -129,7 +128,7 @@ def main():
     ap.add_argument('--no-validity', action='store_true', help='skip the full validity enumeration')
     ap.add_argument('--filter', help='only encodings with (w & MASK) == VAL, as VAL/MASK in hex')
     ap.add_argument('--show', type=int, default=40)
-    ap.add_argument('--cflags', default='-march=x86-64-v3' if platform.machine().lower() in ('amd64', 'x86_64') else '')
+    ap.add_argument('--cflags', default=default_cflags())
     args = ap.parse_args()
     r = random.Random(args.seed)
     t0 = time.time()

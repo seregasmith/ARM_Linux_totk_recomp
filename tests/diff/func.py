@@ -23,7 +23,6 @@ Usage: func.py [--exefs DIR] [--modules main,subsdk0,sdk] [--functions N] [--cas
 """
 import argparse
 import os
-import platform
 import random
 import subprocess
 import sys
@@ -36,7 +35,8 @@ import numpy as np
 import unicorn as uc
 from unicorn import arm64_const as A
 
-from common import BUF, BUF_SIZE, MSYS_BIN, ROOT, Emu, compiler, diff_state, rand_fpcr, rand_v, rand_x, run_harness
+from common import BUF, BUF_SIZE, MSYS_BIN, ROOT, Emu, compiler_cmd, default_cflags, diff_state, rand_fpcr, rand_v, \
+    rand_x, run_harness
 import gen
 import patches
 from layout import layout
@@ -178,7 +178,7 @@ def check_function(emitter, entry, end):
 
 def build(work, emitted, jobs, cflags):
     """Compile the emitted functions with harness.c into work/func[.exe]; tests[k] is emitted[k]."""
-    cc = compiler()
+    cc = compiler_cmd()
     env = dict(os.environ)
     if os.name == 'nt' and MSYS_BIN.exists():
         env['PATH'] = str(MSYS_BIN) + os.pathsep + env.get('PATH', '')
@@ -210,11 +210,11 @@ def build(work, emitted, jobs, cflags):
     for s in srcs:
         o = work / (s.stem + '.o')
         objs.append(o)
-        procs.append(subprocess.Popen([cc] + flags + ['-c', str(s), '-o', str(o)], env=env))
+        procs.append(subprocess.Popen(cc + flags + ['-c', str(s), '-o', str(o)], env=env))
     if any(p.wait() for p in procs):
         raise SystemExit('compile failed')
     exe = work / ('func.exe' if os.name == 'nt' else 'func')
-    subprocess.check_call([cc, '-fuse-ld=lld', '-o', str(exe)] + [str(o) for o in objs], env=env)
+    subprocess.check_call(cc + ['-fuse-ld=lld', '-o', str(exe)] + [str(o) for o in objs], env=env)
     return exe
 
 
@@ -345,7 +345,7 @@ def main():
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4)
     ap.add_argument('--show', type=int, default=20)
     ap.add_argument('--patches', type=Path, help='patch table whose spin waits are emitted with their gates')
-    ap.add_argument('--cflags', default='-march=x86-64-v3' if platform.machine().lower() in ('amd64', 'x86_64') else '')
+    ap.add_argument('--cflags', default=default_cflags())
     args = ap.parse_args()
     r = random.Random(args.seed)
     t0 = time.time()

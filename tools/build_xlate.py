@@ -2,8 +2,9 @@
 
 Copies tools/vendor/ryujinx to build/xlate/ryujinx, applies tools/xlate/patches/*.patch there (tools/vendor stays
 byte-identical; 0001-0004 are MNG's, 0005-0011 are ours), then runs `dotnet publish`. Needs the .NET 10 SDK, the MSVC build
-tools and vswhere.exe (docs/building.md). Run with .venv. On Linux it builds build/xlate/totk_xlate for linux-x64, which
-NativeAOT links with the system's clang (no MSVC); NativeAOT builds for the OS it runs on only.
+tools and vswhere.exe (docs/building.md). Run with .venv. On Linux it builds build/xlate/totk_xlate for linux-x64, or
+linux-arm64 on an aarch64 machine, which NativeAOT links with the system's clang (no MSVC); NativeAOT builds for the OS
+and architecture it runs on only.
 
 Next to the exe it writes totk_xlate.id: the translator identity, a sha256 over everything the build reads (this script,
 Program.cs, the csproj, the patches, the vendor tree). runtime/gfx_shader.c puts it into every shader cache key, so a
@@ -18,6 +19,7 @@ translator change re-keys the cache without a hand-made KEY_VERSION bump. --id-o
 import argparse
 import hashlib
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -31,6 +33,8 @@ XLATE = ROOT / "tools" / "xlate"
 BUILD = ROOT / "build" / "xlate"
 WIN = os.name == "nt"
 EXE = "totk_xlate.exe" if WIN else "totk_xlate"
+# The .NET runtime identifier: Windows is x86-64 only; Linux builds for the machine it runs on.
+RID = "win-x64" if WIN else ("linux-arm64" if platform.machine().lower() in ("aarch64", "arm64") else "linux-x64")
 VSWHERE_DIR = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Microsoft Visual Studio" / "Installer"
 
 
@@ -118,7 +122,7 @@ def identity() -> str:
     """sha256 over the translator's inputs, in a fixed order: path and content hash of each file."""
     h = hashlib.sha256()
     files = [Path(__file__).resolve(), XLATE / "Program.cs", XLATE / "totk_xlate.csproj",
-             *sorted((XLATE / "patches").glob("*.patch"))]
+             XLATE / "nativeaot_compat.c", *sorted((XLATE / "patches").glob("*.patch"))]
     for f in files:
         h.update(f"{f.name}\0{hashlib.sha256(f.read_bytes()).hexdigest()}\n".encode())
     for rel, digest in tree_hashes(VENDOR).items():
@@ -166,14 +170,25 @@ def main() -> None:
     out = BUILD / "publish"
     shutil.rmtree(out, ignore_errors=True)
     cmd = [
-        dotnet, "publish", str(work / "totk_xlate.csproj"), "-c", "Release", "-r", "win-x64" if WIN else "linux-x64",
+        dotnet, "publish", str(work / "totk_xlate.csproj"), "-c", "Release", "-r", RID,
         "-p:PublishAot=true", "-p:InvariantGlobalization=true", f"-p:RyuSrc={src}", "-o", str(out),
     ]
     if a.llvm:
         env["PATH"] = str(a.llvm.resolve() / "bin") + os.pathsep + env["PATH"]
         cmd += ["-p:CppCompilerAndLinker=clang", "-p:LinkerFlavor=lld"]
     if a.sysroot:
-        cmd.append(f"-p:SysRoot={a.sysroot.resolve()}")
+        sysroot = a.sysroot.resolve()
+        cmd.append(f"-p:SysRoot={sysroot}")
+        if not WIN and a.llvm:
+            # .NET 10 NativeAOT may reference glibc 2.38/C23 symbols absent from the Ubuntu 22.04
+            # sysroot. Provide compatible wrappers so the portable translator keeps the glibc 2.35 floor.
+            arch = "aarch64" if RID == "linux-arm64" else "x86_64"
+            compat = BUILD / "nativeaot_compat.o"
+            subprocess.run([
+                str(a.llvm.resolve() / "bin" / "clang"), f"--target={arch}-linux-gnu",
+                f"--sysroot={sysroot}", "-c", str(XLATE / "nativeaot_compat.c"), "-o", str(compat),
+            ], check=True, env=env)
+            cmd.append(f"-p:NativeAotCompatObject={compat}")
     if subprocess.run(cmd, env=env).returncode != 0:
         sys.exit("dotnet publish failed")
     exe = BUILD / EXE

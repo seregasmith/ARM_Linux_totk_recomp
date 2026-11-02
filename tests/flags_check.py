@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tests' / 'diff'))
-from common import MSYS_BIN, compiler  # noqa: E402
+from common import MSYS_BIN, compiler_cmd, default_cflags, run_prefix  # noqa: E402
 
 
 def main():
@@ -20,10 +20,11 @@ def main():
     if os.name == 'nt' and MSYS_BIN.exists():
         env['PATH'] = str(MSYS_BIN) + os.pathsep + env.get('PATH', '')
     for opt in ('-O0', '-O1'):
-        subprocess.check_call([compiler(), opt, '-fno-strict-aliasing', '-I', str(ROOT / 'runtime'),
-                               str(ROOT / 'tests' / 'flags_check.c'), '-o', str(exe)], env=env)
+        subprocess.check_call(compiler_cmd() + [opt, '-fuse-ld=lld', '-fno-strict-aliasing', *default_cflags().split(),
+                                                '-I', str(ROOT / 'runtime'), str(ROOT / 'tests' / 'flags_check.c'),
+                                                '-o', str(exe)], env=env)
         print(opt, end=': ', flush=True)
-        if subprocess.run([str(exe)], env=env).returncode:
+        if subprocess.run(run_prefix() + [str(exe)], env=env).returncode:
             return 1
     return 0
 

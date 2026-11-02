@@ -40,7 +40,7 @@ typedef struct {
 } ModInfo;
 
 void mods_scan(void);              // once; later calls return at once
-const char *mods_dir(void);        // the folder scanned (default: <dir of totk.exe>/mods)
+const char *mods_dir(void);        // the folder scanned (default: <cfg_data_dir>/mods, beside totk.exe unless TOTK_DATA_DIR)
 int mods_count(void);
 ModInfo *mods_at(int i);           // 0 = top of the order; NULL out of range
 // Menu edits (present path). They change the list mods_at shows and write TOTK_MODS_ORDER / TOTK_MODS_DISABLED with

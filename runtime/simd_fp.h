@@ -19,8 +19,9 @@ SI int FN(isqnan)(U u) { return FN(isnan)(u) && (u & QB); }
 SI int FN(isinf)(U u) { return (u & ~SGN) == EXPM; }
 SI int FN(iszero)(U u) { return !(u & ~SGN); }
 SI int FN(isden)(U u) { return !(u & EXPM) && (u & ~SGN); }
-// The asm hides the float origin of u: LLVM turns the bit test into an FP class compare otherwise, and with
-// MXCSR.DAZ set (FPCR.FZ) the host compare sees a denormal as zero. Same in FN(vflush).
+// The asm hides the float origin of u: LLVM turns the bit test into an FP class compare otherwise, and with the host's
+// flush-to-zero set (FPCR.FZ: MXCSR.DAZ on x86-64, the host FPCR.FZ on AArch64) the host compare sees a denormal as
+// zero. Same in FN(vflush).
 SI T FN(flush)(T x) {
     U u = FN(fb)(x);
     __asm__("" : "+r"(u));
@@ -187,7 +188,7 @@ SI VTU FN(vsel)(VTS m, VTU x, VTU y) { return (x & (VTU)m) | (y & ~(VTU)m); }
 
 SI VT FN(vflush)(VT a) {
     VTU u = (VTU)a;
-    __asm__("" : "+x"(u));
+    __asm__("" : SIMD_VREG(u));
     VTU mag = u & ~((VTU){} + SGN);
     VTS den = (mag != 0) & ((u & EXPM) == 0);
     return (VT)FN(vsel)(den, u & SGN, u);

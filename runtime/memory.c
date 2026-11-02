@@ -74,6 +74,12 @@ static volatile uint8_t frz[RT_ADDRESS_LIMIT >> FRZ_SHIFT];
 static uint32_t thaw_ms[RT_ADDRESS_LIMIT >> FRZ_SHIFT];   // frz_lock: GetTickCount of the last thaw request, 0 never
 static volatile int32_t nfrz;
 static PlatMutex frz_lock = PLAT_MUTEX_INIT;
+// Region write tracking (written_pages, below), frz_lock: the region was frozen since a query last found it written;
+// its cooldown in ms (0 none); and a plat_now_ms() deadline: thawed, it is not frozen again before it; frozen, a query
+// after it that finds the region still frozen ends the cooldown.
+static uint8_t rw_armed[RT_ADDRESS_LIMIT >> FRZ_SHIFT];
+static uint16_t rw_cool[RT_ADDRESS_LIMIT >> FRZ_SHIFT];
+static uint32_t rw_until[RT_ADDRESS_LIMIT >> FRZ_SHIFT];
 static volatile int64_t frz_count[4];   // freezes; thaws by a write fault, by mem_thaw, by a mapping change
 
 static int watched(uint64_t addr, uint64_t size) {
@@ -131,6 +137,16 @@ static int freeze_locked(uint64_t r) {
     return n > 0;
 }
 
+// frz_lock held exclusively. Freezes region r (freeze_locked) and counts it; 1 when it is frozen.
+static int freeze_region_locked(uint64_t r) {
+    if (!freeze_locked(r)) return 0;
+    __atomic_store_n(&frz[r], 1, __ATOMIC_RELEASE);
+    plat_inc32(&nfrz);
+    plat_inc64(&frz_count[0]);
+    rw_armed[r] = 1;
+    return 1;
+}
+
 int mem_freeze(uint64_t a) {
     if ((a & (FRZ_SIZE - 1)) || !watched(a, FRZ_SIZE)) return 0;
     uint64_t r = a >> FRZ_SHIFT;
@@ -138,12 +154,7 @@ int mem_freeze(uint64_t a) {
     plat_mutex_lock(&frz_lock);
     if (frz[r]) ok = 1;
     else if (thaw_ms[r] && (int32_t)((uint32_t)plat_now_ms() - thaw_ms[r]) < (int32_t)FRZ_HOLD_MS) ok = 0;   // |1 may be ahead
-    else if (freeze_locked(r)) {
-        __atomic_store_n(&frz[r], 1, __ATOMIC_RELEASE);
-        plat_inc32(&nfrz);
-        plat_inc64(&frz_count[0]);
-        ok = 1;
-    }
+    else ok = freeze_region_locked(r);
     plat_mutex_unlock(&frz_lock);
     return ok;
 }
@@ -249,11 +260,121 @@ void mem_init(void) {
 
 const RtGuestLayout *mem_layout(void) { return &L; }
 
+// ---- region write tracking
+// Where the system tracks no page writes (platform.h plat_mem_watch_problem: a Linux kernel built without userfaultfd,
+// as some handheld kernels are), writes are tracked per 2 MiB region with the frozen regions above. A frozen region was
+// written by nobody since its freeze, as the first write thaws it; any other region counts as written whole. A query
+// that resets reports every committed page of each region it finds thawed, also the part outside [addr, addr + size),
+// and freezes the region again, so its next write is seen: the freeze ends the region's record for every consumer
+// (vk_memory.c ww_query stamps what each query reports into one generation table that all of them share). A region
+// found written after a freeze stays thawed for a cooldown, RW_COOL_MS doubling up to RW_COOL_MAX_MS, and loses it once
+// it stays unwritten that long after its next freeze: a region the game writes every frame then costs a copy of what
+// the GPU uses of it per check, not a fault and a protection change per query. Coarser than page bits, but bounded: untracked, the back end
+// uploaded every pool and texture at every use (about 190 MB a frame in TotK). TOTK_WRITE_WATCH=region chooses it where
+// page tracking works too, for comparisons.
+#define RW_COOL_MS 16u
+#define RW_COOL_MAX_MS 1024u
+static volatile int region_mode = -1;   // 1 region tracking, 0 the system's page bits, -1 not decided yet
+
+// frz_lock held. The committed pages of [lo, hi) after the first got entries of pages, at most max in all; the new
+// count. Committed in any protection: a page made read-only or inaccessible was writable before, and its change thawed
+// the region.
+static uint64_t list_committed(uint64_t lo, uint64_t hi, uint64_t *pages, uint64_t got, uint64_t max) {
+    for (uint64_t x = lo, y; x < hi && got < max; x = y)
+        if (plat_mem_state(x, hi, &y) >= PLAT_PROT_NONE)
+            for (uint64_t p = x; p < y && got < max; p += PAGE) pages[got++] = p;
+    return got;
+}
+
+static uint64_t count_committed(uint64_t lo, uint64_t hi) {
+    uint64_t n = 0;
+    for (uint64_t x = lo, y; x < hi; x = y)
+        if (plat_mem_state(x, hi, &y) >= PLAT_PROT_NONE) n += (y - x) / PAGE;
+    return n;
+}
+
+// A full answer (max pages) leaves the rest for the next call, as the system's queries do; callers repeat the same
+// range until an answer is not full (vk_memory.c query_stamp). The system's pages are reset once reported, so a repeat
+// finds new ones; a region here can stay written (cooling down, held, not freezable), so a repeat of the range that got
+// a full answer continues where it stopped instead of starting over: else the regions that stay written refill every
+// answer, and the caller loops until they freeze (up to a second).
+static uint64_t cont_addr, cont_size, cont_r;   // frz_lock: where the last full answer stopped; cont_size 0: none
+static volatile int64_t rw_stat[3];             // regions reported by queries that reset, those cooling, not freezable
+
+static uint64_t region_written(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max, int reset) {
+    uint64_t got = 0, r0 = addr >> FRZ_SHIFT, r1 = (addr + size - 1) >> FRZ_SHIFT, r = r0;
+    uint32_t now = (uint32_t)plat_now_ms();
+    plat_mutex_lock(&frz_lock);
+    if (cont_size && cont_addr == addr && cont_size == size && cont_r > r0) r = cont_r;   // past r1: nothing left
+    cont_size = 0;
+    for (; r <= r1 && got < max; r++) {
+        if (frz[r]) {   // nobody wrote it since its freeze; quiet as long as its cooldown: that ends
+            if (reset && (int32_t)(now - rw_until[r]) >= 0) rw_cool[r] = 0;
+            continue;
+        }
+        uint64_t a = r << FRZ_SHIFT, b = a + FRZ_SIZE;
+        uint64_t lo = reset ? a : addr > a ? addr : a, hi = reset ? b : addr + size < b ? addr + size : b;
+        uint64_t n = count_committed(lo, hi);
+        if (!n) continue;
+        if (got + n > max) {   // not all of it fits: the next call starts with this region again
+            got = list_committed(lo, hi, pages, got, max);
+            break;
+        }
+        got = list_committed(lo, hi, pages, got, max);
+        if (!reset) continue;   // a peek changes nothing
+        plat_inc64(&rw_stat[0]);
+        if (rw_armed[r]) {   // written since a freeze: stays thawed for a while, longer each time
+            rw_armed[r] = 0;
+            rw_cool[r] = (uint16_t)(!rw_cool[r] ? RW_COOL_MS : rw_cool[r] >= RW_COOL_MAX_MS / 2 ? RW_COOL_MAX_MS
+                                                                                                 : rw_cool[r] * 2);
+            rw_until[r] = now + rw_cool[r];
+            plat_inc64(&rw_stat[1]);
+            continue;
+        }
+        if ((int32_t)(now - rw_until[r]) < 0) {   // cooling down: stays written
+            plat_inc64(&rw_stat[1]);
+            continue;
+        }
+        if (thaw_ms[r] && (int32_t)(now - thaw_ms[r]) < (int32_t)FRZ_HOLD_MS) continue;   // held for a file read
+        if (freeze_region_locked(r)) rw_until[r] = now + rw_cool[r];
+        else plat_inc64(&rw_stat[2]);   // a read-only page in it, say: it stays written
+    }
+    if (got == max) cont_addr = addr, cont_size = size, cont_r = r;
+    plat_mutex_unlock(&frz_lock);
+    return got;
+}
+
+int mem_region_stats(uint64_t *reported, uint64_t *cooling, uint64_t *unfreezable) {
+    *reported = (uint64_t)plat_xchg64(&rw_stat[0], 0);
+    *cooling = (uint64_t)plat_xchg64(&rw_stat[1], 0);
+    *unfreezable = (uint64_t)plat_xchg64(&rw_stat[2], 0);
+    return __atomic_load_n(&region_mode, __ATOMIC_ACQUIRE) == 1;
+}
+
+static int region_tracking(void) {
+    int m = __atomic_load_n(&region_mode, __ATOMIC_ACQUIRE);
+    if (m >= 0) return m;
+    const char *e = cfg_get("TOTK_WRITE_WATCH");
+    m = e && !strcmp(e, "region");
+    if (m) rt_log("memory: writes tracked per 2 MiB region (TOTK_WRITE_WATCH=region)");
+    __atomic_store_n(&region_mode, m, __ATOMIC_RELEASE);
+    return m;
+}
+
 // A range inside one watched reservation (stack and heap block, or alias region) only.
 static uint64_t written_pages(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max, int reset) {
     if (!max || !size) return 0;
     if (!watched(addr, size)) return UINT64_MAX;
-    return plat_mem_written(addr, size, pages, max, reset);
+    if (!region_tracking()) {
+        uint64_t n = plat_mem_written(addr, size, pages, max, reset);
+        const char *why = n == UINT64_MAX ? plat_mem_watch_problem() : NULL;
+        if (!why) return n;
+        int was = __atomic_exchange_n(&region_mode, 1, __ATOMIC_ACQ_REL);
+        if (!was) rt_log("memory: the system tracks no page writes (%s): writes are tracked per 2 MiB region instead, "
+                         "coarser and slower than page tracking. Linux: CONFIG_USERFAULTFD and CONFIG_PTE_MARKER_UFFD_WP",
+                         why);
+    }
+    return region_written(addr, size, pages, max, reset);
 }
 
 uint64_t mem_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max) {

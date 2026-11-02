@@ -655,17 +655,32 @@ int cfg_save_to(const char *path) {
     return ok;
 }
 
+int cfg_data_dir(char *out, size_t cap) {
+    if (!cap) return 0;
+    size_t n = plat_getenv("TOTK_DATA_DIR", out, cap);
+    if (n) {
+        while (n > 1 && (out[n - 1] == '/' || out[n - 1] == '\\')) out[--n] = 0;
+        static int made;   // once per process: the folder of the first call is the folder of every later one
+        if (!__atomic_exchange_n(&made, 1, __ATOMIC_ACQ_REL)) plat_file_mkdir_p(out);
+        return 2;
+    }
+    int len = plat_exe_path(out, cap);
+    char *cut = len && (size_t)len < cap ? plat_last_sep(out) : NULL;
+    if (!cut) {
+        out[0] = 0;
+        return 0;
+    }
+    *cut = 0;
+    return 1;
+}
+
 static char ini_path[1024];
 
 static int find_ini(void) {
     if (ini_path[0]) return 1;
-    char path[1024];
-    if (!plat_exe_path(path, sizeof path)) return 0;
-    char *cut = plat_last_sep(path);
-    if (!cut) cut = strrchr(path, '/');
-    if (!cut || cut + 10 >= path + sizeof path) return 0;
-    strcpy(cut + 1, "totk.ini");
-    snprintf(ini_path, sizeof ini_path, "%s", path);
+    char dir[1024];
+    if (!cfg_data_dir(dir, sizeof dir) || strlen(dir) + sizeof "/totk.ini" > sizeof ini_path) return 0;
+    snprintf(ini_path, sizeof ini_path, "%s/totk.ini", dir);
     return 1;
 }
 

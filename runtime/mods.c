@@ -345,14 +345,10 @@ void mods_scan(void) {
     const char *d = cfg_get("TOTK_MODS_DIR");
     if (d && *d) {
         snprintf(dir, sizeof dir, "%s", d);
-    } else {
-        char exe[2048];
-        if (!plat_exe_path(exe, sizeof exe)) return;
-        char *cut = strrchr(exe, '/'), *back = strrchr(exe, '\\');
-        if (back > cut) cut = back;
-        if (!cut) return;
-        *cut = 0;
-        snprintf(dir, sizeof dir, "%s/mods", exe);
+    } else {   // the player adds mods there, so it is a written folder (cfg_data_dir), beside totk.exe by default
+        char data[2048];
+        if (!cfg_data_dir(data, sizeof data)) return;
+        snprintf(dir, sizeof dir, "%s/mods", data);
     }
     if (!plat_dir_exists(dir)) {
         rt_log("mods: no folder %s", dir);

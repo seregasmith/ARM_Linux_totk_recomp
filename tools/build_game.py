@@ -61,6 +61,7 @@ import ctypes.wintypes as wt   # the job-object structures below; importing it w
 import hashlib
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -93,21 +94,45 @@ CLANG = UCRT / 'clang.exe' if WIN else on_path('clang')
 NINJA = UCRT / 'ninja.exe' if WIN else on_path('ninja')
 SDL3_DLLS = [UCRT / 'SDL3.dll', UCRT / 'libiconv-2.dll', UCRT / 'libopus-0.dll'] if WIN else []
 
-# Flags for generated code as LAS Recomp builds it (Makefile GENFLAGS, Windows), plus -march for the FP/SIMD lowering.
-# --cpu v2 replaces the level for CPUs without AVX2/FMA; runtime/fma.c then supplies the correctly rounded fma the
-# lowering needs (runtime/simd.h).
-GEN_FLAGS = ['-O1', '-fno-strict-aliasing', '-Wno-return-type', '-Wno-unused-label', '-fvisibility=hidden',
-             '-march=x86-64-v3']
-RT_FLAGS = ['-O2', '-g', '-Wall', '-fno-strict-aliasing', '-march=x86-64-v3']
+# Flags for generated code as LAS Recomp builds it (Makefile GENFLAGS, Windows); set_target adds the target
+# architecture's flags and the code level the FP/SIMD lowering is compiled for.
+GEN_FLAGS = ['-O1', '-fno-strict-aliasing', '-Wno-return-type', '-Wno-unused-label', '-fvisibility=hidden']
+RT_FLAGS = ['-O2', '-g', '-Wall', '-fno-strict-aliasing']
+
+ARCHES = ('x86_64', 'aarch64')
+HOST_ARCH = {'amd64': 'x86_64', 'x64': 'x86_64', 'arm64': 'aarch64'}.get(platform.machine().lower(),
+                                                                          platform.machine().lower())
+TRIPLES = {'x86_64': 'x86_64-linux-gnu', 'aarch64': 'aarch64-linux-gnu'}
+# Code levels (--cpu) per target architecture: the compiler flags and the RT_CPU_LEVEL runtime/main.c check_cpu checks
+# the host for. x86-64: v3 (AVX2, FMA, BMI2; the default) and v2 (SSE4.2 and POPCNT, for older CPUs; runtime/fma.c
+# then supplies the correctly rounded fma the lowering needs, runtime/simd.h). AArch64: a64 (Armv8.2 with the LSE
+# atomics, RCpc and the dot product: Snapdragon 8 Gen 2 and newer, Apple M1 and newer, Cortex-A76-class cores; the
+# default) and oryon (the Snapdragon 8 Elite's own cores; needs a clang that knows -mcpu=oryon-1, LLVM 19 or newer).
+CPU_LEVELS = {
+    'x86_64': {'v3': (['-march=x86-64-v3'], 3), 'v2': (['-march=x86-64-v2'], 2)},
+    'aarch64': {'a64': (['-march=armv8.2-a+lse+rcpc+dotprod'], 1), 'oryon': (['-mcpu=oryon-1'], 2)},
+}
+DEFAULT_CPU = {'x86_64': 'v3', 'aarch64': 'a64'}
+# AArch64, every compile: char is unsigned in its ABI and signed on x86-64, where the runtime was written. The runtime
+# only: its volatile variables get acquire loads and release stores (-fms-volatile, what MSVC does on Arm), the order
+# x86-64 gives every access and the runtime's cross-thread flags were written against; its atomics already name their
+# order. The generated code only: x18 stays out of it, so runtime/kernel.c kern_ap_stub can jump back into interrupted
+# game code through it, and no branch protection, because that jump lands on an arbitrary instruction.
+ARCH_FLAGS = {'x86_64': [], 'aarch64': ['-fsigned-char']}
+RT_ARCH_FLAGS = {'x86_64': [], 'aarch64': ['-fms-volatile']}
+GEN_ARCH_FLAGS = {'x86_64': [], 'aarch64': ['-ffixed-x18', '-mbranch-protection=none']}
 
 
-def set_cpu(cpu):
-    """Target x86-64-v3 (the default) or x86-64-v2. RT_CPU_LEVEL lets runtime/main.c's self-test check the same
-    instruction set the build was compiled for."""
-    march = f'-march=x86-64-{cpu}'
-    GEN_FLAGS[GEN_FLAGS.index('-march=x86-64-v3')] = march
-    RT_FLAGS[RT_FLAGS.index('-march=x86-64-v3')] = march
-    RT_FLAGS.append(f'-DRT_CPU_LEVEL={3 if cpu == "v3" else 2}')
+def set_target(arch, cpu):
+    """Build for arch at code level cpu (CPU_LEVELS; None: the default level). RT_CPU_LEVEL lets runtime/main.c's
+    self-test check the same instruction set the build was compiled for."""
+    cpu = cpu or DEFAULT_CPU[arch]
+    if cpu not in CPU_LEVELS[arch]:
+        sys.exit(f'--cpu {cpu} is not a code level of {arch}: {", ".join(CPU_LEVELS[arch])}')
+    flags, level = CPU_LEVELS[arch][cpu]
+    GEN_FLAGS.extend(ARCH_FLAGS[arch] + GEN_ARCH_FLAGS[arch] + flags)
+    RT_FLAGS.extend(ARCH_FLAGS[arch] + RT_ARCH_FLAGS[arch] + flags + [f'-DRT_CPU_LEVEL={level}'])
+    return cpu
 if WIN:
     # _WIN32_WINNT: Windows 10, the port's minimum. MSYS2's headers default to it, llvm-mingw's (the release toolchain)
     # to Windows 7, which hides the per-monitor DPI functions gfx_window_win.c and dpi_probe_win.c call.
@@ -255,10 +280,10 @@ def copy_romfs_patches(version, out):
         print(f'romfs patches: copied {name} from {src}')
 
 
-def work_dir():
-    """The work folder: the [work] dir of config.local.toml (relative to the checkout), where tools/extract.py writes
-    extracted/; build/ without the file or the key."""
-    cfg = ROOT / 'config.local.toml'
+def work_dir(cfg=None):
+    """The work folder: the [work] dir of config.local.toml (or of cfg, as tools/extract.py --config takes it;
+    relative to the checkout), where tools/extract.py writes extracted/; build/ without the file or the key."""
+    cfg = cfg or ROOT / 'config.local.toml'
     if not cfg.is_file():
         return ROOT / 'build'
     import tomllib
@@ -722,8 +747,12 @@ def mib(n):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--version', default='v121', help='game version (default v121)')
-    ap.add_argument('--cpu', choices=('v2', 'v3'), default='v3',
-                    help='target CPU level: v3 (AVX2/FMA, default) or v2 (SSE4.2, for older CPUs; slower)')
+    ap.add_argument('--arch', choices=ARCHES, default=HOST_ARCH if HOST_ARCH in ARCHES else 'x86_64',
+                    help=f'target architecture (default: this machine\'s, {HOST_ARCH}); another than the host\'s '
+                         'needs --sysroot')
+    ap.add_argument('--cpu', choices=sorted({c for levels in CPU_LEVELS.values() for c in levels}),
+                    help='target code level: on x86_64 v3 (AVX2/FMA, default) or v2 (SSE4.2, for older CPUs; slower), '
+                         'on aarch64 a64 (Armv8.2 + LSE, RCpc, dot product; default) or oryon (Snapdragon 8 Elite)')
     ap.add_argument('--gen', type=Path, help='generated C directory (default generated/<version>)')
     ap.add_argument('--out', type=Path, help='build directory (default build/<version>)')
     ap.add_argument('--modules', help='comma-separated subset of the layout modules (default all)')
@@ -760,12 +789,16 @@ def main():
                                                     f'({", ".join(sorted(INSTALL_SIDE))} and modules.c still compile)')
     ap.add_argument('--expected', type=Path,
                     help='expected hashes (default tools/data/expected-<display version>.json)')
+    ap.add_argument('--config', type=Path, help='the settings file whose [work] dir holds extracted/ (default '
+                                                'config.local.toml; tools/extract.py takes the same option)')
     args = ap.parse_args()
-    set_cpu(args.cpu)
+    if WIN and args.arch != 'x86_64':
+        sys.exit('build_game: Windows builds are x86_64 only')
+    set_target(args.arch, args.cpu)
 
     gen = (args.gen or ROOT / 'generated' / args.version).resolve()
     out = (args.out or ROOT / 'build' / args.version).resolve()
-    extracted = None if args.exefs and args.romfs else work_dir() / 'extracted' / args.version
+    extracted = None if args.exefs and args.romfs else work_dir(args.config) / 'extracted' / args.version
     paths = {'exefs': (args.exefs or extracted / 'exefs').resolve(),
              'romfs': (args.romfs or extracted / 'romfs').resolve(),
              'profile': (args.profile or ROOT / 'build' / ('profile' if args.version == 'v121'
@@ -802,11 +835,15 @@ def main():
         for lib in ('opus', 'vpx', 'zstd'):
             LINK_LIBS[LINK_LIBS.index(f'-l{lib}')] = f'-l:lib{lib}.a'
     if args.sysroot and not WIN:
-        # Every compile and the link: the game then needs no newer glibc than the sysroot's (the Steam Runtime's)
-        sysroot = ['--target=x86_64-linux-gnu', f'--sysroot={cmd_path(args.sysroot.resolve())}']
+        # Every compile and the link: the game then needs no newer glibc than the sysroot's (the Steam Runtime's on
+        # x86_64, Ubuntu 22.04's on aarch64), and the sysroot's architecture is the target's
+        sysroot = [f'--target={TRIPLES[args.arch]}', f'--sysroot={cmd_path(args.sysroot.resolve())}']
         GEN_FLAGS[:0] = sysroot
         RT_FLAGS[:0] = sysroot
         LINK_FLAGS[:0] = sysroot
+    elif args.arch != HOST_ARCH:
+        sys.exit(f'build_game: building for {args.arch} on {HOST_ARCH} needs --sysroot (the target\'s glibc headers '
+                 'and libraries)')
     for tool in (CLANG, NINJA):
         if not tool.is_file():
             sys.exit(f'{tool} not found: install ' + ('MSYS2 UCRT64 clang, lld and ninja' if WIN else 'clang, lld and ninja')

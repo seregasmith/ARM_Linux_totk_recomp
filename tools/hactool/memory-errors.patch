@@ -1,0 +1,46 @@
+Applied by tools/build_hactool.py to SciresM/hactool (ISC) at 1d64a83450e025622f3468c28fc4164dad2c5ef6, after
+portable.patch; ours. Two memory errors AddressSanitizer finds in the update merge of tools/extract.py:
+
+- nca.c, nca_process_bktr_section: the relocation and subsection buckets are spread in place from a 0x4000-byte stride
+  to one 20 (relocation) or 16 (subsection) bytes longer, so each destination overlaps its source. memcpy on
+  overlapping ranges is undefined. It happens to work where memcpy is memmove (x86-64 glibc, macOS, Windows); aarch64
+  glibc's memcpy corrupts the buckets and the merge crashes with SIGSEGV. memmove is defined for the overlap.
+- extkeys.c, get_kv: a key line longer than the 1024-byte line buffer (a Lockpick prod.keys's eticket_rsa_keypair has
+  1078 characters) is read without its newline, and trimming its trailing whitespace wrote one byte past the buffer.
+  Such a line now ends at its terminator; its remaining characters come as the next line, which is no valid
+  `name = value` line and is skipped as before.
+
+diff --git a/extkeys.c b/extkeys.c
+index 67ee48a..55fdb76 100644
+--- a/extkeys.c
++++ b/extkeys.c
+@@ -76,7 +76,7 @@ static int get_kv(FILE *f, char **key, char **value) {
+         end = p;
+         *p = '\0';
+     } else {
+-        end = line + strlen(line) + 1;
++        end = line + strlen(line);
+     }
+ 
+     p = line;
+diff --git a/nca.c b/nca.c
+index 2fe877f..a453d44 100644
+--- a/nca.c
++++ b/nca.c
+@@ -1194,14 +1194,14 @@ void nca_process_bktr_section(nca_section_ctx_t *ctx) {
+ 
+         /* This simplifies logic greatly... */
+         for (unsigned int i = ctx->bktr_ctx.relocation_block->num_buckets - 1; i > 0; i--) {
+-            memcpy(bktr_get_relocation_bucket(ctx->bktr_ctx.relocation_block, i), &ctx->bktr_ctx.relocation_block->buckets[i], sizeof(bktr_relocation_bucket_t));
++            memmove(bktr_get_relocation_bucket(ctx->bktr_ctx.relocation_block, i), &ctx->bktr_ctx.relocation_block->buckets[i], sizeof(bktr_relocation_bucket_t));
+         }
+         for (unsigned int i = 0; i + 1 < ctx->bktr_ctx.relocation_block->num_buckets; i++) {
+             bktr_relocation_bucket_t *cur_bucket = bktr_get_relocation_bucket(ctx->bktr_ctx.relocation_block, i);
+             cur_bucket->entries[cur_bucket->num_entries].virt_offset = ctx->bktr_ctx.relocation_block->bucket_virtual_offsets[i + 1];
+         }
+         for (unsigned int i = ctx->bktr_ctx.subsection_block->num_buckets - 1; i > 0; i--) {
+-            memcpy(bktr_get_subsection_bucket(ctx->bktr_ctx.subsection_block, i), &ctx->bktr_ctx.subsection_block->buckets[i], sizeof(bktr_subsection_bucket_t));
++            memmove(bktr_get_subsection_bucket(ctx->bktr_ctx.subsection_block, i), &ctx->bktr_ctx.subsection_block->buckets[i], sizeof(bktr_subsection_bucket_t));
+         }
+         for (unsigned int i = 0; i + 1 < ctx->bktr_ctx.subsection_block->num_buckets; i++) {
+             bktr_subsection_bucket_t *cur_bucket = bktr_get_subsection_bucket(ctx->bktr_ctx.subsection_block, i);

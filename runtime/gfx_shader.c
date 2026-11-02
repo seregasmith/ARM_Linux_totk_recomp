@@ -1,7 +1,7 @@
 // Shader service client: turns an NVN program (control section, code, c1 constants and the
 // translator's answers) into SPIR-V plus reflection through `totk_xlate.exe --serve` children, started lazily with
 // pipes and kept for the life of the process (a pool: TOTK_XLATE_PROCS at run time, more for the boot prewarm).
-// Results are cached in memory and on disk (shader-cache/<key>.spv and <key>.res.json next to totk.exe), so a shader
+// Results are cached in memory and on disk (shader-cache/<key>.spv and <key>.res.json in cfg_data_dir), so a shader
 // is translated once per machine and translator.
 //
 // Keys. The code hash is sha256 over stage (u32), the 0x880-byte control section, code_size (u64), the code, the c1
@@ -276,7 +276,8 @@ static void xlate_identity(void) {
 }
 
 // The repository root is the nearest parent of totk.exe that holds build/xlate/totk_xlate.exe. The shader cache lives
-// next to totk.exe, so every build dir has its own (as the pipeline cache, vk_pipeline.c cache_path_init).
+// in cfg_data_dir, next to totk.exe by default, so every build dir has its own (as the pipeline cache, vk_pipeline.c
+// cache_path_init).
 static void use_preload_start(void);
 
 static void init_paths(void *param) {
@@ -301,8 +302,9 @@ static void init_paths(void *param) {
     if (xlate_cfg && *xlate_cfg && strlen(xlate_cfg) < sizeof xlate_exe) strcpy(xlate_exe, xlate_cfg);
     else if (exe_dir[0] && file_exists(beside)) strcpy(xlate_exe, beside);
     else if (root[0]) snprintf(xlate_exe, sizeof xlate_exe, "%s/build/xlate/totk_xlate" PLAT_EXE_SUFFIX, root);
+    char data[PATH_CAP];
     if (cache_cfg && *cache_cfg && strlen(cache_cfg) < sizeof cache_dir) strcpy(cache_dir, cache_cfg);
-    else if (exe_dir[0]) snprintf(cache_dir, sizeof cache_dir, "%s/shader-cache", exe_dir);
+    else if (cfg_data_dir(data, sizeof data)) snprintf(cache_dir, sizeof cache_dir, "%s/shader-cache", data);
     xlate_identity();
     if (cache_dir[0]) pack_open();
     use_preload_start();
@@ -1968,10 +1970,18 @@ void gfx_shader_prepare_recorded(int threads, int procs) {
 #define PRP_VERSION 1
 #define PRP_REC 36
 
+// The seed files come with the build (tools/package_build.py puts them next to totk.exe); dir, the folder of the
+// pipeline cache, holds them too when nothing moved the cache (TOTK_DATA_DIR, TOTK_PIPELINE_CACHE). dir first.
 int gfx_shader_prepare_seed(const char *dir, int threads, int procs) {
-    char ans[PATH_CAP + 32], prg[PATH_CAP + 32], out[PATH_CAP + 32];
+    char ans[PATH_CAP + 32], prg[PATH_CAP + 32], out[PATH_CAP + 32], exe[PATH_CAP];
     snprintf(ans, sizeof ans, "%s/seed-answers.bin", dir);
     snprintf(prg, sizeof prg, "%s/seed-programs.bin", dir);
+    char *cut = plat_exe_path(exe, sizeof exe) ? plat_last_sep(exe) : NULL;
+    if (cut && !file_exists(ans)) {
+        *cut = 0;
+        snprintf(ans, sizeof ans, "%s/seed-answers.bin", exe);
+        snprintf(prg, sizeof prg, "%s/seed-programs.bin", exe);
+    }
     snprintf(out, sizeof out, "%s/shader-prepared.bin", dir);
     double t0 = (double)plat_now_ms();
     uint64_t fail0 = (uint64_t)n_failures;

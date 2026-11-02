@@ -6,6 +6,9 @@
 #if defined(__x86_64__) || defined(__i386__)
 #include <cpuid.h>
 #endif
+#if defined(__aarch64__) && defined(__linux__)
+#include <stdlib.h>
+#endif
 
 #include "cfg.h"
 #include "host.h"
@@ -26,13 +29,53 @@ void sysinfo_cpu_name(char *out, size_t n) {
     while (*p == ' ') p++;
     snprintf(out, n, "%s", p);
     for (char *e = out + strlen(out); e > out && e[-1] == ' '; e--) e[-1] = 0;
+#elif defined(__aarch64__) && defined(__linux__)
+    // AArch64 has no brand string. Each core's MIDR (implementer and part number) names its design; the cores are listed
+    // by design with their count, biggest first as the kernel numbers them last: "Cortex-X3 x1, Cortex-A715 x2, ...".
+    static const struct { unsigned impl, part; const char *name; } known[] = {
+        {0x51, 0x001, "Qualcomm Oryon"}, {0x51, 0x002, "Qualcomm Oryon"}, {0x41, 0xd03, "Cortex-A53"},
+        {0x41, 0xd05, "Cortex-A55"},     {0x41, 0xd08, "Cortex-A72"},     {0x41, 0xd09, "Cortex-A73"},
+        {0x41, 0xd0b, "Cortex-A76"},     {0x41, 0xd0d, "Cortex-A77"},     {0x41, 0xd41, "Cortex-A78"},
+        {0x41, 0xd44, "Cortex-X1"},      {0x41, 0xd46, "Cortex-A510"},    {0x41, 0xd47, "Cortex-A710"},
+        {0x41, 0xd48, "Cortex-X2"},      {0x41, 0xd4d, "Cortex-A715"},    {0x41, 0xd4e, "Cortex-X3"},
+        {0x41, 0xd80, "Cortex-A520"},    {0x41, 0xd81, "Cortex-A720"},    {0x41, 0xd82, "Cortex-X4"},
+        {0x41, 0xd85, "Cortex-X925"},    {0x41, 0xd87, "Cortex-A725"},    {0x61, 0, "Apple"},
+    };
+    struct { unsigned long long midr; int count; } kinds[8];
+    int nk = 0;
+    for (int cpu = 0; cpu < 256; cpu++) {
+        char path[96], line[32];
+        snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/regs/identification/midr_el1", cpu);
+        FILE *f = fopen(path, "r");
+        if (!f) break;
+        int got = fgets(line, sizeof line, f) != NULL;
+        fclose(f);
+        if (!got) break;
+        unsigned long long midr = strtoull(line, NULL, 16) & 0xff00fff0ull;   // implementer and part, not the revision
+        int k = 0;
+        while (k < nk && kinds[k].midr != midr) k++;
+        if (k == nk && nk < 8) kinds[nk++] = (__typeof__(kinds[0])){midr, 0};
+        if (k < nk) kinds[k].count++;
+    }
+    size_t at = 0;
+    for (int k = nk - 1; k >= 0 && at + 1 < n; k--) {
+        unsigned impl = (unsigned)(kinds[k].midr >> 24), part = (unsigned)(kinds[k].midr >> 4) & 0xfff;
+        const char *name = NULL;
+        for (size_t i = 0; i < sizeof known / sizeof *known && !name; i++)
+            if (known[i].impl == impl && (known[i].part == part || (impl == 0x61 && !known[i].part))) name = known[i].name;
+        int w = name ? snprintf(out + at, n - at, "%s%s x%d", at ? ", " : "", name, kinds[k].count)
+                     : snprintf(out + at, n - at, "%simplementer %#x part %#x x%d", at ? ", " : "", impl, part,
+                                kinds[k].count);
+        if (w < 0) break;
+        at += (size_t)w < n - at ? (size_t)w : n - at - 1;
+    }
 #endif
 }
 
 int sysinfo_log_folder(char *out, size_t n) {
     const char *log = rt_log_path();
     if (log) snprintf(out, n, "%s", log);
-    else if (!plat_stderr_path(out, n) && !plat_exe_path(out, n)) return 0;
+    else if (!plat_stderr_path(out, n)) return cfg_data_dir(out, n) != 0;   // no file yet: where the logs folder goes
     char *s = strrchr(out, '\\'), *f = strrchr(out, '/');
     if (f > s) s = f;
     if (!s) return 0;

@@ -1,0 +1,34 @@
+name: Tests
+
+# The checks that need no game files, on x86-64 and on arm64 (docs/ARM64_PORT_PLAN.md): the FP/SIMD and atomics
+# lowering against Unicorn, the flag helpers, the platform layer's fibers, write-fault hook and kern_ap_stub, and the
+# architecture and platform boundaries of runtime/.
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q clang lld
+          python -m pip install -q unicorn==2.1.4 capstone==5.0.9
+          # runtime/platform/linux.c includes <SDL3/SDL_clipboard.h>; Ubuntu 24.04 has no SDL3 package
+          git clone -q --depth 1 -b release-3.2.24 https://github.com/libsdl-org/SDL.git "$RUNNER_TEMP/SDL"
+      - run: python tools/check_arch.py
+      - run: python tools/check_platform.py
+      - run: python tests/flags_check.py
+      - run: python tests/diff/atomic.py
+      - run: python tests/diff/simd.py
+      - run: python tests/platform_check.py --cflags="-I$RUNNER_TEMP/SDL/include"

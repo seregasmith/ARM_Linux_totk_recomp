@@ -39,7 +39,7 @@ PATH:
 
 ### hactool
 
-`tools/build_hactool.py` fetches SciresM/hactool at `1d64a83` into `toolchain\src\hactool`, applies the three patches in
+`tools/build_hactool.py` fetches SciresM/hactool at `1d64a83` into `toolchain\src\hactool`, applies the four patches in
 `tools/hactool/` and builds a static `toolchain\hactool\hactool.exe` with MSYS2 UCRT64 gcc (a few seconds):
 
 - `portable.patch`: the parts of MacNativeGames' `build_hactool()` that run on Windows, the `MNG_TITLE_KEYS` variable and
@@ -47,7 +47,11 @@ PATH:
 - `unicode.patch`: a manifest with `<activeCodePage>UTF-8</activeCodePage>`, so paths under a non-ASCII user profile
   reach it intact;
 - `mbedtls-asm-clobbers.patch`: the `memory` and `cc` clobbers the bundled mbedtls 2.6.1's x86-64 multiply asm lacks.
-  Without them a clang build (the Linux release) fails every RSA signature check and the update merge stops.
+  Without them a clang build (the Linux release) fails every RSA signature check and the update merge stops;
+- `memory-errors.patch`: two memory errors AddressSanitizer finds in the update merge. `nca_process_bktr_section`
+  spreads the BKTR buckets in place with an overlapping `memcpy`, which aarch64 glibc copies wrongly (the merge crashed
+  with SIGSEGV there; x86-64 glibc, macOS and Windows copy like `memmove`), and `get_kv` wrote a byte past its line
+  buffer on a key line over 1023 characters, such as a Lockpick `eticket_rsa_keypair`.
 
 hactool reads `-k <prod.keys>`; MSYS2 shells set `HOME`, which hides its default key location, so pass `-k` there.
 
@@ -155,7 +159,11 @@ Vega 7 of a Ryzen 5 4600G at about 34 fps). Long play sessions and the Steam Dec
 Requirements:
 
 - Linux 6.7 or later: the write watch uses userfaultfd write protection with `PAGEMAP_SCAN`. SteamOS 3.8 qualifies.
-- A Vulkan 1.3 driver with `VK_EXT_external_memory_host` (RADV, NVIDIA).
+  On a kernel without it (older, or built without `CONFIG_USERFAULTFD`), the game tracks writes per 2 MiB region
+  instead (`runtime/memory.c`, "region write tracking") and says so in `totk.log`: it works, but costs frame rate.
+  `TOTK_WRITE_WATCH=region` chooses that tracking anywhere, for comparisons.
+- A Vulkan 1.3 driver (RADV, NVIDIA). `VK_EXT_external_memory_host` is needed only with `TOTK_SHADOW=0`: the default
+  shadow storage (below) never imports host memory.
 - Packages on Arch:
 
   ```sh
@@ -187,6 +195,67 @@ well: the shadow copies are chosen for the measured cost above, not for a missin
 The Deck's GPU (Van Gogh) has no native ASTC, so its textures go through the compute decoder (`runtime/vk_astc.c`,
 `TOTK_ASTC`) as on desktop AMD GPUs without it; frame times measured there include it.
 
+## ARM64 Linux and the Docker build
+
+The runtime and the lifted code also build for aarch64 Linux (Snapdragon handhelds with Mesa's Turnip; the plan and
+its status: [ARM64_PORT_PLAN.md](ARM64_PORT_PLAN.md)). `tools/build_game.py --arch aarch64` selects the target, and
+`--cpu` its code level: `a64` (the default: Armv8.2 with the LSE atomics, RCpc and the dot product) or `oryon`
+(Snapdragon 8 Elite). The FP/SIMD lowering is the same portable C as on x86-64, with FPCR in place of MXCSR
+(`runtime/platform/fp_arm64.h`); the generated code keeps x18 free for `kern_ap_stub` (`runtime/kern_ap_stub.inc`), and
+the runtime is compiled with `-fsigned-char` and `-fms-volatile` (`tools/build_game.py` `ARCH_FLAGS`).
+
+Requirements beyond x86-64 Linux's: a 4 KB-page kernel with a 48-bit address space (the guest's modules sit at
+0x7000000000) and Linux 6.10 or later for the write watch (arm64 gained userfaultfd write protection in 6.10), built
+with `CONFIG_USERFAULTFD` and `CONFIG_PTE_MARKER_UFFD_WP`. Without them the game falls back to region write tracking
+(above), slower but far faster than copying every pool at each use; `totk.log` names the reason.
+
+`build_docker.sh` builds either architecture from your game files in a Docker container with Nix, on macOS (Apple
+Silicon builds aarch64 natively) or Linux, in the manner of the Bloodborne port's script; `./build_docker.sh --help`
+lists its modes and settings:
+
+```sh
+./build_docker.sh test                       # the toolchain, then the checks that need no game files
+TOTK_BASE=~/Switch/totk.nsp TOTK_UPDATE=~/Switch/totk-143.nsp TOTK_KEYS=~/Switch/prod.keys ./build_docker.sh
+```
+
+The host tools come from `shell.nix` (nixpkgs pinned in the script): Python 3.12 and 3.14 with the packages of
+`tools/requirements*.txt` (uv), clang 23, .NET 10, Ninja. What runs on the handheld is compiled against an Ubuntu 22.04
+sysroot (glibc 2.35) and links Opus, libvpx and zstd statically and SDL3 beside the exe (`tools/nix/default.nix`). The
+sysroot's packages are pinned by `tools/nix/sysroot-<arm64|amd64>.lock.json`; `./build_docker.sh lock` writes it from
+the Ubuntu archive (`tools/nix/sysroot_lock.py`). The game step ends with a portable folder (`tools/package_build.py`)
+in `build/install-<arch>/totk-<version>`; copy it to the handheld and run `./totk --prepare-shaders` there once.
+
+`./build_docker.sh appimage` builds the same game and packs it as `TotK-Recomp-<version>-<arch>.AppImage` in
+`build/install-<arch>` (`tools/package_appimage.py`), with the RomFS beside it in `romfs-<version>/`. Copy both into
+one folder on the handheld, run the AppImage with `--prepare-shaders` once, then start it. The image is read-only and
+about 0.5 GB; the 16 GB RomFS stays outside it, so a rebuild repacks only the code:
+
+- What the game writes goes to `~/.local/share/totk-recomp/<version>` (`TOTK_DATA_DIR`, below; `XDG_DATA_HOME` moves
+  it). The saves go to `~/.local/share/totk-recomp/profile`, one for every version, since saves load on any of them.
+- The RomFS: `TOTK_ROMFS`, else the first folder that holds `romfs.bin` of: `romfs-<version>/` and `romfs/` beside the
+  AppImage, the AppImage's own folder, `romfs/` in the data folder, the data folder. Without one, it lists the paths
+  it looked at.
+- The front is AppImage's static type-2 runtime, release 20251108, pinned by hash in `tools/nix/default.nix`. It
+  mounts the image with FUSE when the device has `/dev/fuse` and `fusermount`; without them, start it with
+  `--appimage-extract-and-run`.
+- The game uses the device's Vulkan driver (Mesa's Turnip).
+- Code mods (ExeFS patches, code cheats) need a rebuild of the game, which a read-only image cannot do. RomFS mods
+  work: put them in `mods/` in the data folder.
+
+The AppImage holds code and data derived from your game: for your own devices only, never publish or share it.
+
+`TOTK_DATA_DIR` (`runtime/cfg.h` `cfg_data_dir`) names the folder for everything the game writes: `totk.ini`, `logs/`,
+the profile (unless `TOTK_PROFILE_DIR` names one), the shader and pipeline caches (`shader-cache/`,
+`pipeline-cache.bin` and the files beside it), `mesa-cache/`, `mods/` and `flight/`. Unset, all of it stays next to
+`totk`, as before. The files the build made stay next to `totk` either way: `totk_xlate`, `romfs-index.bin`, the RomFS
+patches, `seed-*.bin`, `exefs/` and `build-cache/`.
+
+The checks run on aarch64 too. A cross run names the compiler and an emulator: `CC='clang --target=aarch64-linux-gnu
+--sysroot=DIR'` and `TOTK_TEST_RUN='qemu-aarch64 -L DIR'` (tests/diff/common.py). `tests/platform_check.py` checks
+the fiber switch, the write-fault hook and, on aarch64, `kern_ap_stub` against a thread it interrupts; QEMU's user mode
+leaves the ESR out of signal frames, so the write-fault part runs on a real kernel only. `tools/check_arch.py` fails on
+x86-only code outside an x86-64 branch.
+
 ## Checks
 
 Before a commit:
@@ -194,6 +263,7 @@ Before a commit:
 - `python tools/check_content.py --staged`: nothing game-derived is staged. CI runs the same check;
   `git config core.hooksPath .githooks` runs it before each local commit.
 - `build\<ver>\totk.exe --selftest`: layout, dispatch table and host-function registry, without game files.
+- `python tools/check_arch.py`: no x86-only code outside an x86-64 branch, so the aarch64 build keeps compiling.
 
 A change to the button prompts (`tools/make_romfs_patches.py --prompts`, `tools/button_icons.py`) passes
 `.venv-py314\Scripts\python tests\romfs_prompts_test.py`, which runs the tool on a RomFS it makes itself (no game
