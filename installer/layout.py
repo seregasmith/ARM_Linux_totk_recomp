@@ -21,6 +21,7 @@ Release (docs/installer.md "Release layout"), root = the unpacked folder:
 Linux release (the AppImage's folder, docs/installer.md "Linux release"): python/bin/python3 (python-build-standalone,
 with tkinter), llvm/ with clang, lld and llvm-ar plus llvm/sysroot (the glibc headers and libraries the game links
 against), runtime/deps/ with include/ and the static Opus, libvpx and zstd, bin/ without .exe and with libSDL3.so.0.
+The aarch64 release has the same folders; its runtime libraries are libtotkrt.a (a64) and libtotkrt-oryon.a.
 
 Dev mode, root = a repository checkout (no python/python.exe): build/py314-embed/py/python.exe (the embeddable
 Python the release ships, with the same packages), else this Python; toolchain/llvm-mingw-*/ and toolchain/deps-mingw;
@@ -30,6 +31,7 @@ refs/MacNativeGames; build/pgo/pgo-<v>.profdata when there is one; build/install
 dev mode takes clang, lld and ninja from PATH and the system's libraries (no deps folder, no SDL3 copy).
 """
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -40,6 +42,12 @@ WIN = os.name == 'nt'
 EXE = '.exe' if WIN else ''
 UCRT = Path(r'C:\msys64\ucrt64\bin')
 SUPPORTED = ('1.2.1', '1.4.3', '1.1.0')   # updates the installer builds; the check identifies the player's by hash
+# This machine's architecture and its code levels (tools/build_game.py CPU_LEVELS), the default first: the release
+# carries one runtime library per level, libtotkrt.a for the default and libtotkrt-<level>.a for the others
+ARCH = {'amd64': 'x86_64', 'x64': 'x86_64', 'arm64': 'aarch64'}.get(platform.machine().lower(),
+                                                                  platform.machine().lower())
+CPU_LEVELS = {'x86_64': ('v3', 'v2'), 'aarch64': ('a64', 'oryon')}
+DEFAULT_CPU = CPU_LEVELS.get(ARCH, CPU_LEVELS['x86_64'])[0]
 
 
 def version_tag(version):
@@ -58,7 +66,7 @@ class Layout:
     llvm: Path            # llvm-mingw tree; on Linux the tree with bin/clang (a release's, or the system's /usr)
     deps: Path | None     # include/ and lib/ for the link; None: the system's (Linux dev mode)
     runtime: Path         # runtime headers and install-side sources
-    runtime_lib: Path     # libtotkrt.a
+    runtime_lib: Path     # libtotkrt.a, the default code level's; the others' are beside it (runtime_lib_for)
     ninja: Path
     hactool: Path
     xlate: Path           # totk_xlate.exe; a totk_xlate.id beside it is copied too
@@ -67,7 +75,6 @@ class Layout:
     ini_example: Path | None = None
     temp: Path | None = None
     sysroot: Path | None = None       # Linux release: what the game links against, instead of the host's
-    runtime_lib_v2: Path | None = None   # libtotkrt-v2.a: the runtime for CPUs without AVX2 (build_game.py --cpu v2)
     pgo_dir: Path | None = None       # pgo-<v>.profdata (tools/pgo.py); None: no profiles (Linux)
 
     @property
@@ -75,9 +82,11 @@ class Layout:
         return self.llvm / 'bin' / ('clang' + EXE)
 
     def runtime_lib_for(self, cpu):
-        """The prebuilt runtime library for cpu (v2 or v3). None in dev mode when it was not built: the runtime is
-        then compiled from the sources in runtime/ instead."""
-        lib = self.runtime_lib_v2 if cpu == 'v2' else self.runtime_lib
+        """The prebuilt runtime library for a code level: runtime_lib for the default (v3, a64), libtotkrt-<level>.a
+        beside it for another (libtotkrt-v2.a: CPUs without AVX2; libtotkrt-oryon.a: the Snapdragon 8 Elite's cores;
+        tools/make_release_linux.py rtlib_name). None in dev mode when it was not built: the runtime is then compiled
+        from the sources in runtime/ instead."""
+        lib = self.runtime_lib if cpu == DEFAULT_CPU else self.runtime_lib.with_name(f'libtotkrt-{cpu}.a')
         if lib and lib.is_file():
             return lib
         return None if self.dev else lib
@@ -96,7 +105,7 @@ class Layout:
         """The expected hashes of the update."""
         return self.tools / 'data' / f'expected-v{version}.json'
 
-    def missing(self, cpu='v3'):
+    def missing(self, cpu=DEFAULT_CPU):
         """Paths the steps need that do not exist. cpu picks the runtime library the host will use."""
         lib = self.runtime_lib_for(cpu)
         need = [self.python, self.tools / 'extract.py', self.tools / 'ncz.py', self.tools / 'build_game.py',
@@ -133,7 +142,6 @@ def release_layout(root):
         tools=root / 'tools', recomp=root / 'recomp',
         llvm=root / 'llvm', deps=root / 'runtime' / 'deps', runtime=root / 'runtime',
         runtime_lib=root / 'runtime' / 'libtotkrt.a',
-        runtime_lib_v2=root / 'runtime' / 'libtotkrt-v2.a',
         ninja=root / 'bin' / ('ninja' + EXE), hactool=root / 'bin' / ('hactool' + EXE),
         xlate=root / 'bin' / ('totk_xlate' + EXE),
         dlls=(root / 'bin' / 'SDL3.dll', root / 'bin' / 'libopus-0.dll') if WIN else (root / 'bin' / 'libSDL3.so.0',),
@@ -160,7 +168,6 @@ def dev_layout(root):
         tools=root / 'tools', recomp=root / 'recomp',
         llvm=trees[-1] if trees else root / 'toolchain' / 'llvm-mingw-missing', deps=deps,
         runtime=root / 'runtime', runtime_lib=root / 'build' / 'install-rtlib' / 'libtotkrt.a',
-        runtime_lib_v2=root / 'build' / 'install-rtlib' / 'libtotkrt-v2.a',
         ninja=UCRT / ('ninja' + EXE), hactool=root / 'toolchain' / 'hactool' / ('hactool' + EXE),
         xlate=root / 'build' / 'xlate' / ('totk_xlate' + EXE),
         dlls=tuple(sorted((deps / 'bin').glob('*.dll'))),
@@ -181,7 +188,6 @@ def dev_layout_posix(root):
         python=Path(sys.executable), tools=root / 'tools', recomp=root / 'recomp',
         llvm=Path(clang).parent.parent if clang else root / 'toolchain' / 'clang-missing', deps=None,
         runtime=root / 'runtime', runtime_lib=root / 'build' / 'install-rtlib' / 'libtotkrt.a',
-        runtime_lib_v2=root / 'build' / 'install-rtlib' / 'libtotkrt-v2.a',
         ninja=Path(ninja) if ninja else root / 'toolchain' / 'ninja-missing',
         hactool=root / 'toolchain' / 'hactool' / 'hactool', xlate=root / 'build' / 'xlate' / 'totk_xlate',
         shader_list=None, ini_example=root / 'totk.ini.example', temp=root / 'build' / 'install-temp')

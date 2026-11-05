@@ -35,7 +35,7 @@ import urllib.request
 from pathlib import Path
 
 from . import ini
-from .layout import EXE, SUPPORTED, version_tag
+from .layout import ARCH, CPU_LEVELS, DEFAULT_CPU, EXE, SUPPORTED, version_tag
 from .runner import InstallError, Step
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'tools'))
@@ -126,8 +126,9 @@ def linux_glibc():
 
 
 # The bundled clang, lld and the cryptography wheel are built against glibc 2.34 (tools/make_release_linux.py
-# GLIBC_FLOOR); on an older one they cannot start
-GLIBC_NEEDED = (2, 34)
+# TARGETS glibc); on an older one they cannot start. On aarch64 the game, hactool, the shader translator and SDL3 are
+# linked against the Ubuntu 22.04 sysroot's 2.35.
+GLIBC_NEEDED = (2, 35) if ARCH == 'aarch64' else (2, 34)
 
 
 def linux_kernel():
@@ -347,7 +348,7 @@ class Check(Step):
 
     def run(self, ctx):
         layout, rep, dest = ctx.layout, ctx.reporter, ctx.dest
-        missing = layout.missing(getattr(ctx, 'cpu', 'v3'))
+        missing = layout.missing(getattr(ctx, 'cpu', DEFAULT_CPU))
         if missing:
             raise InstallError('check.release_incomplete', paths=missing[:5])
         if dest.exists() and not dest.is_dir():
@@ -428,10 +429,11 @@ class Check(Step):
         except ValueError:
             raise InstallError('check.host_probe_failed', code=r.returncode) from None
         ctx.reporter.log(f'host: {r.stdout.strip()}')
-        if not host['x86_64_v2']:
-            raise InstallError('check.cpu_too_old')
-        # v3 is the faster build; v2 runs on CPUs without AVX2/FMA (runtime/fma.c supplies the fused multiply-add).
-        ctx.cpu = 'v3' if host['x86_64_v3'] else 'v2'
+        ctx.cpu = self.cpu_level(ctx, host)
+        page = host.get('page_size', 4096)
+        if page != 4096:
+            # runtime/memory.c maps guest memory in the Switch's 4 KiB pages
+            raise InstallError('check.page_size', size=page)
         if not host['loader']:
             raise InstallError('check.vulkan_missing')
         devices = host['devices']
@@ -440,12 +442,36 @@ class Check(Step):
         if not any(tuple(d['api'][:2]) >= (1, 3) for d in devices):
             raise InstallError('check.vulkan_too_old',
                                devices=', '.join(f'{d["name"]} ({d["api"][0]}.{d["api"][1]})' for d in devices))
-        kernel = linux_kernel()
-        if kernel and kernel < (6, 7):
-            # Without userfaultfd's asynchronous write protection nothing tracks the CPU's writes: the game copies whole
-            # pools to the GPU at each submit and its texture checks see every page as changed (docs/building.md, Linux)
-            ctx.reporter.warning('warn.kernel_old', version='.'.join(map(str, kernel)))
+        if host.get('write_watch') is False:
+            # Without userfaultfd's asynchronous write protection (Linux before 6.7, or a kernel built without
+            # CONFIG_USERFAULTFD) the game tracks the CPU's writes per 2 MiB region (runtime/memory.c), which costs
+            # some speed but no correctness: worth a line in the log, not a warning
+            kernel = linux_kernel()
+            ctx.reporter.log(f'host: Linux {".".join(map(str, kernel or ()))} has no asynchronous write protection; '
+                             'the game tracks writes per 2 MiB region')
         ctx.host = host
+
+    @staticmethod
+    def cpu_level(ctx, host):
+        """The code level to build for: --cpu or TOTK_CPU when given (one this CPU runs), else the host check's
+        preferred one. x86-64: v3, else v2 for CPUs without AVX2/FMA (runtime/fma.c supplies the fused multiply-add).
+        AArch64: oryon on Qualcomm's Oryon cores (the Snapdragon 8 Elite), else a64."""
+        arch = host.get('arch', 'x86_64')
+        levels = host.get('levels')
+        if levels is None:   # a host check from before the levels list
+            levels = [lv for lv, key in (('v3', 'x86_64_v3'), ('v2', 'x86_64_v2')) if host.get(key)]
+        if not levels:
+            raise InstallError('check.cpu_too_old_arm' if arch == 'aarch64' else 'check.cpu_too_old')
+        wanted = getattr(ctx.options, 'cpu', None) or os.environ.get('TOTK_CPU', '').strip()
+        if not wanted:
+            return host.get('preferred') or levels[0]
+        known = CPU_LEVELS.get(arch, ())
+        if wanted not in known:
+            raise InstallError('check.cpu_level_unknown', cpu=wanted, known=', '.join(known))
+        if wanted not in levels:
+            raise InstallError('check.cpu_level_unsupported', cpu=wanted, levels=', '.join(levels))
+        ctx.reporter.log(f'host: code level {wanted}, as asked (the host check prefers {host.get("preferred")})')
+        return wanted
 
     def inputs(self, ctx):
         """Open both files with the keys as the extraction will. Returns the bytes of both Program NCAs."""
@@ -934,7 +960,7 @@ NINJA_LINE = re.compile(r'^\[(\d+)/(\d+)\] ')
 def runtime_key(ctx):
     """Fingerprint of what totk.exe is built from besides the lifted code: the runtime, the toolchain and the build
     tools. Shader preparation depends on these, not on the code cheats a lift adds."""
-    layout, cpu = ctx.layout, getattr(ctx, 'cpu', 'v3')
+    layout, cpu = ctx.layout, getattr(ctx, 'cpu', DEFAULT_CPU)
     clang = subprocess.run([str(layout.clang), '--version'], capture_output=True, text=True).stdout
     tools = [layout.tools / n for n in ('build_game.py', 'romfs_index.py', 'check_content.py', 'check_isa.py')]
     return fingerprint('runtime-1', cpu, layout.runtime_lib_for(cpu), layout.runtime, layout.deps or 'system',
@@ -970,7 +996,7 @@ class Compile(Step):
                 rep.progress('compile', 'link', force=True)
 
         rep.progress('compile', 'compile', force=True)
-        cpu = getattr(ctx, 'cpu', 'v3')
+        cpu = getattr(ctx, 'cpu', DEFAULT_CPU)
         lib = layout.runtime_lib_for(cpu)
         pgo = layout.pgo(game_version(ctx))
         code, log = run_tool(ctx, 'compile', layout.tools / 'build_game.py', [

@@ -242,26 +242,46 @@ Requirements beyond x86-64 Linux's: a 4 KB-page kernel with a 48-bit address spa
 with `CONFIG_USERFAULTFD` and `CONFIG_PTE_MARKER_UFFD_WP`. Without them the game falls back to region write tracking
 (above), slower but far faster than copying every pool at each use; `totk.log` names the reason.
 
-`build_docker.sh` builds either architecture from your game files in a Docker container with Nix, on macOS (Apple
-Silicon builds aarch64 natively) or Linux, in the manner of the Bloodborne port's script; `./build_docker.sh --help`
-lists its modes and settings:
+`build_docker.sh` builds either architecture in a Docker container with Nix, on macOS (Apple Silicon builds aarch64
+natively) or Linux, in the manner of the Bloodborne port's script; `./build_docker.sh --help` lists its modes and
+settings. The host tools come from `shell.nix` (nixpkgs pinned in the script): Python 3.12 and 3.14 with the packages
+of `tools/requirements*.txt` (uv), clang 23, .NET 10, Ninja. What runs on the handheld is compiled against an Ubuntu
+22.04 sysroot (glibc 2.35) and links Opus, libvpx and zstd statically and SDL3 beside the exe (`tools/nix/default.nix`).
+The sysroot's packages are pinned by `tools/nix/sysroot-<arm64|amd64>.lock.json`; `./build_docker.sh lock` writes it
+from the Ubuntu archive (`tools/nix/sysroot_lock.py`), and every run writes it anew when it is missing or the script's
+package list changed (commit it).
+
+For a handheld it makes three separate things, each with its own mode. All land in `build/install-<arch>`
+(`TOTK_OUT`):
+
+| Mode | What it makes | Game files (`TOTK_BASE`, `TOTK_UPDATE`, `TOTK_KEYS`) |
+|---|---|---|
+| `appimage` | `TotK-Recomp-<version>-<arch>.AppImage`: the game's code and the files its build made, without the RomFS | the first time; later runs reuse the extraction in the Docker volumes |
+| `romfs` | `romfs-<version>/romfs.bin`: the game's data (16 GB), for beside the game AppImage | always |
+| `setup` | `TotK-Setup-<arch>.AppImage`: the setup, which builds the game on the handheld from the player's own files | never |
 
 ```sh
 ./build_docker.sh test                       # the toolchain, then the checks that need no game files
-TOTK_BASE=~/Switch/totk.nsp TOTK_UPDATE=~/Switch/totk-143.nsp TOTK_KEYS=~/Switch/prod.keys ./build_docker.sh
+TOTK_BASE=~/Switch/totk.nsp TOTK_UPDATE=~/Switch/totk-143.nsp TOTK_KEYS=~/Switch/prod.keys ./build_docker.sh romfs
+./build_docker.sh appimage                   # the code only, from the extraction romfs left in the volumes
+./build_docker.sh setup
 ```
 
-The host tools come from `shell.nix` (nixpkgs pinned in the script): Python 3.12 and 3.14 with the packages of
-`tools/requirements*.txt` (uv), clang 23, .NET 10, Ninja. What runs on the handheld is compiled against an Ubuntu 22.04
-sysroot (glibc 2.35) and links Opus, libvpx and zstd statically and SDL3 beside the exe (`tools/nix/default.nix`). The
-sysroot's packages are pinned by `tools/nix/sysroot-<arm64|amd64>.lock.json`; `./build_docker.sh lock` writes it from
-the Ubuntu archive (`tools/nix/sysroot_lock.py`). The game step ends with a portable folder (`tools/package_build.py`)
-in `build/install-<arch>/totk-<version>`; copy it to the handheld and run `./totk --prepare-shaders` there once.
+The game AppImage and `romfs.bin` are the two halves of a game built on the computer: the code changes with every
+rebuild, the data only with the update, so a rebuild copies 0.5 GB to the handheld instead of 16 GB. The setup is the
+other way to the same game: it carries the toolchain instead of the code and builds the game on the handheld.
 
-`./build_docker.sh appimage` builds the same game and packs it as `TotK-Recomp-<version>-<arch>.AppImage` in
-`build/install-<arch>` (`tools/package_appimage.py`), with the RomFS beside it in `romfs-<version>/`. Copy both into
-one folder on the handheld, run the AppImage with `--prepare-shaders` once, then start it. The image is read-only and
-about 0.5 GB; the 16 GB RomFS stays outside it, so a rebuild repacks only the code:
+`game` (the default mode) builds the same game as `appimage` into a plain portable folder instead
+(`tools/package_build.py`, `build/install-<arch>/totk-<version>`, with the RomFS inside unless `TOTK_ROMFS=0`); copy
+it to the handheld and run `./totk --prepare-shaders` there once.
+
+### The game AppImage
+
+`./build_docker.sh appimage` extracts and lifts the game, compiles and links it and packs it as
+`TotK-Recomp-<version>-<arch>.AppImage` (`tools/package_appimage.py`). Without game files it reuses the extraction an
+earlier `appimage`, `romfs` or `game` run left in the Docker build volume (`TOTK_VERSION` picks one when there are
+several), and asks for the files when there is none. Put it beside `romfs-<version>/` from `romfs` on the handheld,
+run it with `--prepare-shaders` once, then start it. The image is read-only and about 0.5 GB:
 
 - What the game writes goes to `~/.local/share/totk-recomp/<version>` (`TOTK_DATA_DIR`, below; `XDG_DATA_HOME` moves
   it). The saves go to `~/.local/share/totk-recomp/profile`, one for every version, since saves load on any of them.
@@ -282,6 +302,27 @@ the profile (unless `TOTK_PROFILE_DIR` names one), the shader and pipeline cache
 `pipeline-cache.bin` and the files beside it), `mesa-cache/`, `mods/` and `flight/`. Unset, all of it stays next to
 `totk`, as before. The files the build made stay next to `totk` either way: `totk_xlate`, `romfs-index.bin`, the RomFS
 patches, `seed-*.bin`, `exefs/` and `build-cache/`.
+
+### The RomFS
+
+`./build_docker.sh romfs` extracts the game files (the update merged into the base game, then checked against the
+update's expected hashes, as for every build) and copies the RomFS image to `romfs-<version>/romfs.bin`, where the
+game AppImage looks first. A copy of the same size already there is kept. The extraction needs about 55 GB free in
+Docker's disk at its peak and stays in the build volume, so a later `appimage` run needs no game files. The RomFS is
+the game's own data: for your own devices only.
+
+### The setup AppImage
+
+`./build_docker.sh setup` builds the setup AppImage, without game files: `TotK-Setup-<arch>.AppImage`, the Linux
+release of `docs/installer.md` ("Linux release") with the toolchain inside it. It builds the game on the handheld
+itself from the player's files, so it holds no game code and can be shared. Its runtime libraries are compiled against
+a `layout.h` that holds only the module set (`recomp/layout.py` `write_runtime_only`), the one part of the generated
+layout the runtime reads. When an earlier run left a lifted version in the build volumes, it also builds that game
+once with the folder's own tools as a check (`tools/make_release_linux.py --prove`, the self-test and the kernel probe;
+the probes that need a GPU run on the device). The window checks run under Xvfb in the container, and the setup's own
+installer pass stops at its Vulkan check there, as the container has no GPU (`--no-gpu`).
+
+### Checks on aarch64
 
 The checks run on aarch64 too. A cross run names the compiler and an emulator: `CC='clang --target=aarch64-linux-gnu
 --sysroot=DIR'` and `TOTK_TEST_RUN='qemu-aarch64 -L DIR'` (tests/diff/common.py). `tests/platform_check.py` checks

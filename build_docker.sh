@@ -6,7 +6,7 @@
 # Hosts: macOS on Apple Silicon or Intel (Docker Desktop, OrbStack or colima), Linux on arm64 or x86-64 (Docker Engine).
 # A target that matches Docker's own architecture builds natively; the other one runs emulated (Rosetta or QEMU, slow).
 #
-# Usage:  ./build_docker.sh [--arch aarch64|x86_64] [tools|test|game|appimage|lock|shell|clean]
+# Usage:  ./build_docker.sh [--arch aarch64|x86_64] [tools|test|game|appimage|romfs|setup|lock|shell|clean]
 #   --arch  target architecture (or TOTK_ARCH; arm64 and amd64 work too). Default: Docker's own architecture
 #   tools   (no game files) Python environments, refs/, hactool, the shader translator, and from Nix the target
 #           toolchain, sysroot (Ubuntu 22.04, glibc 2.35) and libraries (SDL3, Opus, libvpx, zstd)
@@ -14,16 +14,24 @@
 #           layer, check_arch/check_platform); after a game build also the lift, function and jump-table tests
 #   game    (default) tools, then the game from your files: extract, lift, RomFS patches, compile and link, the shader
 #           seeds, and a portable folder in TOTK_OUT (game files below). Rebuilds only what changed
-#   appimage  game, but packed as TotK-Recomp-<version>-<arch>.AppImage in TOTK_OUT (tools/package_appimage.py), with
-#           the RomFS beside it in romfs-<version>/: the image is read-only and holds no RomFS. The game writes its
-#           settings, saves, logs and caches to ~/.local/share/totk-recomp on the device
-#   lock    write tools/nix/sysroot-<arm64|amd64>.lock.json: the pinned Ubuntu packages of the target sysroot (the
-#           first tools run does it when the file is missing; commit it)
+#   appimage  game, but packed as TotK-Recomp-<version>-<arch>.AppImage in TOTK_OUT (tools/package_appimage.py): the
+#           game's code, without the RomFS (romfs makes that). The game files are needed only while the build volume
+#           holds no extraction; without them it builds from an earlier run's (TOTK_VERSION picks one of several).
+#           The image is read-only; the game writes its settings, saves, logs and caches to
+#           ~/.local/share/totk-recomp on the device
+#   romfs   the game's data for beside the AppImage: extract and verify the game files, then romfs-<version>/romfs.bin
+#           (16 GB) in TOTK_OUT. The extraction stays in the build volume for later appimage runs
+#   setup   (no game files) the setup AppImage, TotK-Setup-<arch>.AppImage in TOTK_OUT (tools/make_release_linux.py):
+#           it builds the game on the device itself from the player's own files, with the toolchain inside it, and
+#           holds no game code. After a game run it also builds that game once with the setup's own tools, as a check
+#   lock    write tools/nix/sysroot-<arm64|amd64>.lock.json: the pinned Ubuntu packages of the target sysroot (a run
+#           does it when the file is missing or tools/nix/sysroot_lock.py lists other packages; commit it)
 #   shell   interactive nix-shell in the build environment, in the source tree
 #   clean   delete this target's image and volumes (the build, the generated C, venvs, toolchain caches, refs and its
 #           own Nix store; not a volume named by TOTK_NIX_VOLUME). The source tree and TOTK_OUT are untouched
 #
-# Game files (game and appimage modes; each mounted read-only, the keys file never read by this script or printed):
+# Game files (game and romfs modes, and appimage before its first extraction; each mounted read-only, the keys file
+# never read by this script or printed):
 #   TOTK_BASE      the base game, XCI or NSP
 #   TOTK_UPDATE    the 1.4.3, 1.2.1 or 1.1.0 update NSP
 #   TOTK_KEYS      prod.keys from your console
@@ -31,20 +39,20 @@
 # Example:
 #   TOTK_BASE=~/Switch/totk.nsp TOTK_UPDATE=~/Switch/totk-143.nsp TOTK_KEYS=~/Switch/prod.keys ./build_docker.sh
 # Then copy the folder to the handheld, run `./totk --prepare-shaders` there once (the GPU half of the shader step),
-# and play `./totk`. With appimage: copy the AppImage and romfs-<version>/ into one folder on the handheld, run the
-# AppImage with --prepare-shaders once, then start it. Both hold code and data derived from your game: for your own
-# devices only.
+# and play `./totk`. With appimage and romfs: copy the AppImage and romfs-<version>/ into one folder on the handheld,
+# run the AppImage with --prepare-shaders once, then start it; a code change needs only appimage again. All of these
+# hold code or data of your game: for your own devices only.
 #
 # Settings (environment variables):
 #   TOTK_ARCH       target, as --arch (the option wins)
 #   TOTK_SRC        source tree (default: the directory this script is in)
 #   TOTK_VERSION    v143, v121 or v110: the version the update file must be. Default: the update's own, told by
-#                   tools/extract.py from its code
+#                   tools/extract.py from its code. appimage without game files: which extraction to build from
 #   TOTK_CPU        code level: aarch64 a64 (default; Armv8.2 + LSE, RCpc, dot product) or oryon (Snapdragon 8
 #                   Elite); x86_64 v3 (default) or v2. tools/build_game.py CPU_LEVELS
-#   TOTK_OUT        where the portable folder, totk-<version>, or the AppImage goes (default: build/install-<arch> in
-#                   the source tree, which git ignores)
-#   TOTK_ROMFS      0: leave the 16 GB RomFS image out of the folder or from beside the AppImage (copy it yourself)
+#   TOTK_OUT        where the portable folder, totk-<version>, the AppImages and romfs-<version>/ go (default:
+#                   build/install-<arch> in the source tree, which git ignores)
+#   TOTK_ROMFS      0: leave the 16 GB RomFS image out of the portable folder (copy it yourself)
 #   TOTK_NIX_VOLUME an existing Docker volume to use as the Nix store. The Bloodborne port's build_docker.sh pins the
 #                   same nixpkgs, so its volume saves the downloads: TOTK_NIX_VOLUME=bbport-nix (aarch64) or
 #                   bbport-nix-x86_64. It must exist and hold the target architecture's Nix
@@ -66,7 +74,10 @@ MODE=game
 VERSION=${TOTK_VERSION:-}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-usage() { echo "Usage: $0 [--arch aarch64|x86_64] [tools|test|game|appimage|lock|shell|clean]" >&2; exit 2; }
+usage() {
+    echo "Usage: $0 [--arch aarch64|x86_64] [tools|test|game|appimage|romfs|setup|lock|shell|clean]" >&2
+    exit 2
+}
 norm_arch() {
     case $1 in
         aarch64|arm64|armv8*) echo aarch64 ;;
@@ -80,7 +91,7 @@ while [ $# -gt 0 ]; do
         --arch) [ $# -ge 2 ] || usage; ARCH=$2; shift 2 ;;
         --arch=*) ARCH=${1#--arch=}; shift ;;
         -h|--help) awk 'NR > 1 && /^set -eo/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
-        tools|test|game|appimage|lock|shell|clean) MODE=$1; shift ;;
+        tools|test|game|appimage|romfs|setup|lock|shell|clean) MODE=$1; shift ;;
         *) echo "ERROR: unknown argument '$1'" >&2; usage ;;
     esac
 done
@@ -136,8 +147,12 @@ SRC=$(cd -- "$SRC" 2>/dev/null && pwd) || die "TOTK_SRC directory not found"
     die "$SRC is not the TotK Recomp source tree (no tools/build_game.py, shell.nix, recomp/). Put this script in its root or set TOTK_SRC."
 
 # Game files: each one mounted read-only on its own, under its own name (tools/extract.py tells NSP from XCI by it).
+# appimage takes them when given (any of the three), else it builds from an earlier run's extraction.
 game_flags=()
-if [ "$MODE" = game ] || [ "$MODE" = appimage ]; then
+WITH_GAME=0
+if [ "$MODE" = game ] || [ "$MODE" = romfs ] ||
+   { [ "$MODE" = appimage ] && [ -n "${TOTK_BASE:-}${TOTK_UPDATE:-}${TOTK_KEYS:-}" ]; }; then
+    WITH_GAME=1
     for var in TOTK_BASE TOTK_UPDATE TOTK_KEYS; do
         eval "f=\${$var:-}"
         [ -n "$f" ] || die "$var is not set: $MODE needs TOTK_BASE (XCI/NSP), TOTK_UPDATE (NSP) and TOTK_KEYS (prod.keys)"
@@ -153,6 +168,8 @@ if [ "$MODE" = game ] || [ "$MODE" = appimage ]; then
         fw=$(cd -- "$TOTK_FIRMWARE" 2>/dev/null && pwd) || die "TOTK_FIRMWARE: no such folder: $TOTK_FIRMWARE"
         game_flags+=(-v "$fw:/game/firmware:ro" -e TOTK_GAME_FIRMWARE=/game/firmware)
     fi
+fi
+if [ "$MODE" = game ] || [ "$MODE" = appimage ] || [ "$MODE" = romfs ] || [ "$MODE" = setup ]; then
     OUT=${TOTK_OUT:-$SRC/build/install-$ARCH}
     mkdir -p "$OUT"
     OUT=$(cd -- "$OUT" && pwd)
@@ -201,9 +218,11 @@ if [ "$mem_mib" -lt 7500 ]; then
     echo "WARNING: little RAM for this build. Give Docker 8 GB or more" \
          "(Docker Desktop: Settings > Resources > Memory), or expect a slow build." >&2
 fi
-if [ "$MODE" = game ] || [ "$MODE" = appimage ]; then
+if [ "$WITH_GAME" = 1 ]; then
     shown=${VERSION:-the update\'s version}
     echo "==> Game ($shown) into $OUT; the extraction needs about 55 GB free in Docker's disk at its peak"
+elif [ "$MODE" = appimage ]; then
+    echo "==> Game into $OUT, from an extraction an earlier run left in the build volume (no game files given)"
 fi
 
 # Linux host, rootful Docker Engine: files the container writes into the tree belong to root on the host; the
@@ -344,7 +363,9 @@ if [ "$mode" = shell ]; then
     nix-shell shell.nix --command ". /tmp/totk-env.sh; return"
     exit $?
 fi
-if [ "$mode" = lock ] || [ ! -f "tools/nix/sysroot-$debarch.lock.json" ]; then
+# The lock is written anew when it is missing or tools/nix/sysroot_lock.py's package list changed (its --check)
+if [ "$mode" = lock ] ||
+   ! in_shell "the sysroot lock is current" "python3 tools/nix/sysroot_lock.py --arch $debarch --check"; then
     in_shell "the sysroot lock (tools/nix/sysroot-$debarch.lock.json; commit it)" \
         "python3 tools/nix/sysroot_lock.py --arch $debarch"
     [ "$mode" = lock ] && exit 0
@@ -401,7 +422,10 @@ if [ "$mode" = test ]; then
     for t in "tests/flags_check.py" "tests/diff/simd.py --jobs $TOTK_JOBS" "tests/diff/atomic.py --jobs $TOTK_JOBS" \
              "tests/platform_check.py --cflags=-I$deps/include" "tools/check_arch.py" "tools/check_platform.py" \
              "tests/installer_test.py"; do
-        in_shell "test: $t" "$env py $t" || failed="$failed $t"
+        # the installer's tests import tools/ncz.py, which needs Python 3.14 (compression.zstd)
+        run=py
+        case $t in tests/installer_test.py) run=py314 ;; esac
+        in_shell "test: $t" "$env $run $t" || failed="$failed $t"
     done
     # A known failure upstream as well: the CAS-based exclusive monitor does not detect ABA (cpu.h ldx/stx).
     in_shell "test (known to fail its ABA cases): tests/excl_mt.py" "$env py tests/excl_mt.py --iters 50000" || true
@@ -421,34 +445,103 @@ if [ "$mode" = test ]; then
 fi
 [ "$mode" = tools ] && { echo "==> Tools ready"; exit 0; }
 
-# ---- game: the player's files (read-only mounts), the settings file the tools read, then the pipeline
-cat > /tmp/config.docker.toml <<CONFIG
-[input]
-base = '$TOTK_GAME_BASE'
-updates = ['$TOTK_GAME_UPDATE']
-keys = '$TOTK_GAME_KEYS'
-${TOTK_GAME_FIRMWARE:+firmware = '$TOTK_GAME_FIRMWARE'}
+# ---- setup: the setup AppImage (tools/make_release_linux.py), without game files
+if [ "$mode" = setup ]; then
+    rel=build/release/TotK-Setup-linux-$TOTK_ARCH
+    image=TotK-Setup-$TOTK_ARCH.AppImage
+    # Under Xvfb, with fonts, for the window checks; the folder's own programs (Python, LLVM, the hostcheck) run
+    # through nix-ld. The container has no GPU: the installer pass stops at its Vulkan check (--no-gpu).
+    in_shell "the setup release ($rel; $image in TOTK_OUT)" \
+        "FONTCONFIG_FILE=\$TOTK_FONTS_CONF xvfb-run -a -s '-screen 0 1280x800x24' \
+             env LD_LIBRARY_PATH=\$TOTK_WHEEL_LIBS /src/.venv/bin/python tools/make_release_linux.py \
+             --arch $TOTK_ARCH --sysroot $sysroot --deps $deps --no-gpu --out $rel --appimage /out/$image"
+    # The check that builds a game with the folder's own tools needs a lifted version and its extraction, which only
+    # an earlier game run leaves in the build volumes (tools/make_release.py lifted_version: v121, else v143)
+    v=
+    for c in v121 v143; do
+        if [ -f "generated/$c/layout.json" ] && [ -d "build/extracted/$c/exefs" ]; then v=$c; break; fi
+    done
+    if [ -n "$v" ]; then
+        in_shell "$v built with the setup's own tools (tools/make_release_linux.py --prove, the default level)" \
+            "py tools/make_release_linux.py --arch $TOTK_ARCH --out $rel --prove --no-gpu --run-with '$run_target'"
+    else
+        echo "==> No lifted game in the build volumes, so the check that builds one with the setup's own tools" \
+             "is skipped (a game run first makes it possible)" | tee -a "$log"
+    fi
+    echo "==> The setup: $image in TOTK_OUT" | tee -a "$log"
+    exit 0
+fi
 
-[work]
-dir = 'build'
-CONFIG
-in_shell "extract and verify the game (build/extracted)" "py314 tools/extract.py --config /tmp/config.docker.toml"
-# The version: the folder tools/extract.py made for this update file (its extraction-manifest.json names the source).
-in_shell "the update's version" \
-    "py314 -c 'import json, pathlib, sys
+# ---- game, appimage, romfs: the player's files (read-only mounts), the settings file the tools read, the extraction,
+# then the pipeline. appimage without the files builds from an extraction an earlier run left in build/extracted.
+{
+    if [ -n "${TOTK_GAME_BASE:-}" ]; then
+        printf "[input]\nbase = '%s'\nupdates = ['%s']\nkeys = '%s'\n" \
+            "$TOTK_GAME_BASE" "$TOTK_GAME_UPDATE" "$TOTK_GAME_KEYS"
+        if [ -n "${TOTK_GAME_FIRMWARE:-}" ]; then printf "firmware = '%s'\n" "$TOTK_GAME_FIRMWARE"; fi
+        printf '\n'
+    fi
+    printf "[work]\ndir = 'build'\n"
+} > /tmp/config.docker.toml
+if [ -n "${TOTK_GAME_BASE:-}" ]; then
+    in_shell "extract and verify the game (build/extracted)" "py314 tools/extract.py --config /tmp/config.docker.toml"
+    # The version: the folder tools/extract.py made for this update file (its extraction-manifest.json names the
+    # source).
+    in_shell "the update's version" \
+        "py314 -c 'import json, pathlib, sys
 src = str(pathlib.Path(sys.argv[1]).resolve())
 for d in sorted(pathlib.Path(\"build/extracted\").glob(\"v*\")):
     m = d / \"extraction-manifest.json\"
     if d.name != \"v0\" and m.is_file() and json.loads(m.read_text())[\"source\"] == src:
         print(d.name)' \"$TOTK_GAME_UPDATE\" > /tmp/version && cat /tmp/version"
-v=$(head -n 1 /tmp/version)
-if [ -z "$v" ] || [ ! -d "build/extracted/$v/exefs" ]; then
-    echo "ERROR: no extracted update for $TOTK_GAME_UPDATE in build/extracted"
-    exit 1
+    v=$(head -n 1 /tmp/version)
+    if [ -z "$v" ] || [ ! -d "build/extracted/$v/exefs" ]; then
+        echo "ERROR: no extracted update for $TOTK_GAME_UPDATE in build/extracted" | tee -a "$log"
+        exit 1
+    fi
+    if [ -n "${TOTK_VERSION:-}" ] && [ "$TOTK_VERSION" != "$v" ]; then
+        echo "ERROR: the update file is $v, not TOTK_VERSION=$TOTK_VERSION (unset TOTK_VERSION to build $v)" |
+            tee -a "$log"
+        exit 1
+    fi
+else
+    # An earlier run's extraction of an update (tools/extract.py: build/extracted/v<version> with its manifest; v0 is
+    # the base game): TOTK_VERSION's, else the only one
+    have=
+    for d in build/extracted/v*; do
+        n=${d##*/}
+        if [ "$n" != v0 ] && [ -f "$d/extraction-manifest.json" ] && [ -d "$d/exefs" ]; then have="$have $n"; fi
+    done
+    have=${have# }
+    if [ -z "$have" ]; then
+        echo "ERROR: the build volume holds no extracted game: give TOTK_BASE, TOTK_UPDATE and TOTK_KEYS (this run" \
+             "extracts them), or run ./build_docker.sh romfs with them first" | tee -a "$log"
+        exit 1
+    fi
+    if [ -n "${TOTK_VERSION:-}" ]; then
+        case " $have " in
+            *" $TOTK_VERSION "*) v=$TOTK_VERSION ;;
+            *) echo "ERROR: no extraction of TOTK_VERSION=$TOTK_VERSION in the build volume (it holds: $have)" |
+                   tee -a "$log"
+               exit 1 ;;
+        esac
+    elif [ "$have" = "${have%% *}" ]; then
+        v=$have
+    else
+        echo "ERROR: the build volume holds extractions of $have: set TOTK_VERSION to the one to build" | tee -a "$log"
+        exit 1
+    fi
+    echo "==> Building $v from the extraction in build/extracted/$v (no game files given)" | tee -a "$log"
 fi
-if [ -n "${TOTK_VERSION:-}" ] && [ "$TOTK_VERSION" != "$v" ]; then
-    echo "ERROR: the update file is $v, not TOTK_VERSION=$TOTK_VERSION (unset TOTK_VERSION to build $v)"
-    exit 1
+if [ "$mode" = romfs ]; then
+    # The extraction verified the image; a copy of the same size is that copy, kept from an earlier run.
+    in_shell "the RomFS (romfs-$v/romfs.bin in TOTK_OUT, 16 GB)" \
+        "src=build/extracted/$v/romfs/romfs.bin dst=/out/romfs-$v/romfs.bin &&
+         mkdir -p /out/romfs-$v &&
+         if [ -f \$dst ] && [ \$(stat -c %s \$dst) = \$(stat -c %s \$src) ]; then echo 'up to date';
+         else cp \$src \$dst.part && mv \$dst.part \$dst && echo copied; fi"
+    echo "==> The game's data: romfs-$v/ in TOTK_OUT" | tee -a "$log"
+    exit 0
 fi
 if [ -n "${TOTK_GAME_FIRMWARE:-}" ]; then
     in_shell "the shared fonts" "py314 tools/extract_fonts.py --config /tmp/config.docker.toml"
@@ -468,7 +561,7 @@ in_shell "shader seeds (translated and built on the device: totk --prepare-shade
     "py314 tools/prepare_shaders.py build/$v --version $v --no-run"
 if [ "$mode" = appimage ]; then
     # The folder without its RomFS (made afresh in the build volume), packed with squashfs behind AppImage's pinned
-    # static runtime; the RomFS goes beside the AppImage, where its AppRun looks for romfs-<version>/.
+    # static runtime; the RomFS goes beside the AppImage (romfs mode), where its AppRun looks for romfs-<version>/.
     image=TotK-Recomp-$v-$TOTK_ARCH.AppImage
     in_shell "the AppImage runtime (Nix: AppImage's static type-2 runtime, pinned by hash)" \
         "nix-build tools/nix -A appimageRuntime --argstr arch $TOTK_ARCH -o $nixroots/appimage-runtime >/dev/null"
@@ -478,15 +571,7 @@ if [ "$mode" = appimage ]; then
              --out build/appimage/totk-$v &&
          py tools/package_appimage.py --game build/appimage/totk-$v --version $v --arch $TOTK_ARCH \
              --runtime $nixroots/appimage-runtime --out /out/$image"
-    if [ "${TOTK_ROMFS:-1}" != 0 ]; then
-        # The extraction verified the image; a copy of the same size is that copy, kept from an earlier run.
-        in_shell "the RomFS beside the AppImage (romfs-$v/romfs.bin in TOTK_OUT, 16 GB)" \
-            "src=build/extracted/$v/romfs/romfs.bin dst=/out/romfs-$v/romfs.bin &&
-             mkdir -p /out/romfs-$v &&
-             if [ -f \$dst ] && [ \$(stat -c %s \$dst) = \$(stat -c %s \$src) ]; then echo 'up to date';
-             else cp \$src \$dst.part && mv \$dst.part \$dst && echo copied; fi"
-    fi
-    echo "==> The game: $image and romfs-$v/ in TOTK_OUT"
+    echo "==> The game's code: $image in TOTK_OUT (its RomFS: ./build_docker.sh romfs)" | tee -a "$log"
     exit 0
 fi
 romfs=--with-romfs
@@ -511,7 +596,12 @@ docker run --rm ${tty_flags[@]+"${tty_flags[@]}"} \
 
 case $MODE in
     game) echo "==> Done: the folder totk-<version> in $OUT. Copy it to the device, run ./totk --prepare-shaders there once, then ./totk." ;;
-    appimage) echo "==> Done: TotK-Recomp-<version>-$ARCH.AppImage and romfs-<version>/ in $OUT. Copy both into one folder on" \
-                   "the device, run the AppImage with --prepare-shaders there once, then start it." ;;
+    appimage) echo "==> Done: TotK-Recomp-<version>-$ARCH.AppImage in $OUT. Put it beside romfs-<version>/" \
+                   "(./build_docker.sh romfs) on the device, run it with --prepare-shaders there once," \
+                   "then start it." ;;
+    romfs) echo "==> Done: romfs-<version>/romfs.bin in $OUT. Copy that folder beside the game AppImage" \
+                "on the device." ;;
+    setup) echo "==> Done: TotK-Setup-$ARCH.AppImage in $OUT. Copy it to the device with your game files and start" \
+                "it there: it builds the game into a folder you pick (TOTK_CPU=a64 or oryon picks the code level)." ;;
     tools) echo "==> Done: the $ARCH build tools are ready in the Docker volumes." ;;
 esac

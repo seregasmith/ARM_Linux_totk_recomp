@@ -1,5 +1,5 @@
 """Command line: python -m installer --base FILE --update FILE --keys FILE --lang CODE --dest DIR [--firmware DIR]
-                                     [--root DIR] [--temp DIR] [--verify] [--dlss]
+                                     [--root DIR] [--temp DIR] [--verify] [--dlss] [--cpu LEVEL]
 
 A first install needs every option. --firmware names the Switch firmware folder (an unpacked firmware or an emulator's
 Contents/registered); the setup extracts the system shared fonts from it when the language is Chinese, Korean or
@@ -10,6 +10,10 @@ line, 3 cancelled (Ctrl+C or Ctrl+Break).
 
 --dlss downloads NVIDIA's DLSS library (nvngx_dlss.dll) from NVIDIA's DLSS SDK repository into the install folder on
 Windows with an NVIDIA RTX GPU (steps.py, Dlss).
+
+--cpu (or the TOTK_CPU environment variable, which the window passes on) builds for that code level instead of the
+one the host check picks: v3 or v2 on x86-64, a64 or oryon on aarch64 (tools/build_game.py CPU_LEVELS). The check stops
+on a level this CPU cannot run (steps.py, Check.cpu_level).
 """
 import argparse
 import hashlib
@@ -63,6 +67,8 @@ def main(argv=None):
     ap.add_argument('--verify', action='store_true', help='hash every kept file, also those this release made')
     ap.add_argument('--dlss', action='store_true', help="download NVIDIA's nvngx_dlss.dll (NVIDIA RTX SDK license) next "
                                                       'to the game, for dlaa and the DLSS modes')
+    ap.add_argument('--cpu', help='code level to build for instead of the one the host check picks: v3 or v2 on '
+                                  'x86-64, a64 or oryon on aarch64 (TOTK_CPU does the same)')
     args = ap.parse_args(argv)
 
     # The window cancels with Ctrl+Break to the installer's process group (CREATE_NEW_PROCESS_GROUP), which also reaches

@@ -9,9 +9,11 @@ jammy-updates and jammy-security. build_docker.sh lock runs it; commit the file 
 
 Standard library only. Usage:
     python3 tools/nix/sysroot_lock.py --arch arm64|amd64 [--mirror URL] [--out FILE] [--packages FILE...]
+    python3 tools/nix/sysroot_lock.py --arch arm64|amd64 --check
   --mirror    the archive: ports.ubuntu.com/ubuntu-ports for arm64, archive.ubuntu.com/ubuntu for amd64 by default; a
               dated snapshot.ubuntu.com URL pins the index too
   --packages  read these (uncompressed) Packages files instead of the archive's, for a test
+  --check     exit 1 when the lock file is missing or was written for other ROOTS (build_docker.sh then writes it anew)
 """
 import argparse
 import json
@@ -33,6 +35,8 @@ ROOTS = [
     'libx11-dev', 'libxext-dev', 'libxrandr-dev', 'libxcursor-dev', 'libxfixes-dev', 'libxi-dev', 'libxss-dev',
     'libxtst-dev', 'libxkbcommon-dev', 'libwayland-dev', 'libdecor-0-dev', 'libegl-dev', 'libgles-dev', 'libgl-dev',
     'libdrm-dev', 'libgbm-dev', 'libasound2-dev', 'libpulse-dev', 'libpipewire-0.3-dev', 'libudev-dev', 'libdbus-1-dev',
+    # the setup AppImage (tools/make_release_linux.py build_tk_xft): Tk rebuilt with Xft, so text uses system fonts
+    'libxft-dev', 'libfontconfig-dev', 'libfreetype-dev',
 ]
 # Packages a sysroot does without: interpreters, package-system and configuration machinery, build tools.
 SKIP = re.compile(r'^(perl|perl-base|perl-modules-.*|python3.*|libpython3.*|debconf.*|dpkg|dpkg-dev|tzdata|adduser|'
@@ -152,7 +156,19 @@ def main():
     ap.add_argument('--mirror', help='archive URL (default: Ubuntu\'s ports archive for arm64, main archive for amd64)')
     ap.add_argument('--out', type=Path, help='default tools/nix/sysroot-<arch>.lock.json')
     ap.add_argument('--packages', type=Path, nargs='*', help='local Packages files instead of the archive\'s (tests)')
+    ap.add_argument('--check', action='store_true', help='only check that the lock file was written for ROOTS')
     a = ap.parse_args()
+    out = a.out or Path(__file__).resolve().parent / f'sysroot-{a.arch}.lock.json'
+    if a.check:
+        try:
+            lock = json.loads(out.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            sys.exit(f'sysroot_lock: no lock file {out}')
+        if lock.get('roots') != ROOTS:
+            added = sorted(set(ROOTS) - set(lock.get('roots') or ()))
+            sys.exit(f'sysroot_lock: {out.name} was written for other roots (new: {", ".join(added) or "none"})')
+        print(f'sysroot_lock: {out.name} is current')
+        return
     mirror = (a.mirror or MIRRORS[a.arch]).rstrip('/') + '/'
     stanzas = []
     if a.packages:
@@ -170,7 +186,6 @@ def main():
         sys.exit('sysroot_lock: not in the index: ' + '; '.join(sorted(set(missing))))
     packages = [{'name': n, 'version': best[n]['Version'], 'url': mirror + best[n]['Filename'],
                  'sha256': best[n]['SHA256']} for n in names]
-    out = a.out or Path(__file__).resolve().parent / f'sysroot-{a.arch}.lock.json'
     out.write_text(json.dumps({'release': 'Ubuntu 22.04 (jammy)', 'arch': a.arch, 'mirror': mirror,
                                'roots': ROOTS, 'packages': packages}, indent=1) + '\n', encoding='utf-8')
     print(f'sysroot_lock: {len(packages)} packages -> {out}')

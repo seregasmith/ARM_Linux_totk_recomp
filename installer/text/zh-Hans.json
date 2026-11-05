@@ -52,6 +52,10 @@
  "check.glibc_old": "此系统的 C 库为 glibc {version}；安装程序的编译器需要 {need} 或更新版本（Ubuntu 22.04、Debian 12、Fedora 35、SteamOS 3 及更新版本都满足）。更新系统即可解决。",
  "check.host_probe_failed": "电脑检查未能运行（退出代码 {code}）。",
  "check.cpu_too_old": "此处理器不支持 x86-64-v2（SSE4.2、POPCNT 和 CMPXCHG16B），这是游戏所需的最低指令集。Intel Nehalem（2008 年）或 AMD Bulldozer（2011 年）及更新的处理器都支持。",
+ "check.cpu_too_old_arm": "此处理器不支持带 LSE 原子操作、RCpc 和点积指令的 Armv8.2，这是游戏在 ARM 上所需的最低指令集。Cortex-A76（骁龙 855，2019 年）、Apple M1 及更新的核心都支持。",
+ "check.cpu_level_unknown": "TOTK_CPU 或 --cpu 指定的代码级别“{cpu}”不属于此处理器的架构。可用：{known}。",
+ "check.cpu_level_unsupported": "TOTK_CPU 或 --cpu 指定的代码级别“{cpu}”此处理器无法运行；它支持：{levels}。取消设置 TOTK_CPU 即可由安装程序自动选择。",
+ "check.page_size": "此系统使用 {size} 字节的内存页；游戏需要 4 KiB（4096 字节）的内存页，与 Switch 相同。请使用 4 KiB 页的内核（Asahi Linux 和部分 Raspberry Pi 内核使用 16 KiB）。",
  "check.vulkan_missing": "未安装 Vulkan 驱动。请为你的显卡安装最新的驱动程序。",
  "check.vulkan_no_device": "Vulkan 找不到显卡。请为你的显卡安装最新的驱动程序。",
  "check.vulkan_too_old": "游戏需要支持 Vulkan 1.3 的显卡；检测到：{devices}。请更新显卡驱动程序。",
@@ -105,7 +109,6 @@
  "warn.npdm_differs": "main.npdm 与参考的 {version} 导出不同；只使用其中的代码模块。",
  "warn.xbox_prompts_failed": "无法准备 Xbox 或 PC 按键提示（退出代码 {code}）；游戏将继续使用 Switch 按键提示。详情：{log}",
  "warn.shaders_skipped": "显卡驱动在编译部分着色器时崩溃，因此有 {count} 个着色器未被预先准备。游戏会在首次需要时编译它们，驱动在那时也可能崩溃；更新驱动可能会解决。详情：{log}",
- "warn.kernel_old": "Linux {version} 缺少游戏依赖的写入跟踪功能（需要 6.7 或更新版本）；游戏可能运行得很慢。更新系统即可解决。",
  "warn.dlss_kept": "安装文件夹中已有 DLSS 库（{path}）；安装程序将保留它。",
  "warn.dlss_download_failed": "无法从 {url} 下载 NVIDIA DLSS：{detail}。游戏无需它也能运行；下次运行安装程序时会重试。",
 

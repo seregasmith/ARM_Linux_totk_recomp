@@ -52,6 +52,10 @@
  "check.glibc_old": "A biblioteca C deste sistema é a glibc {version}; o compilador da instalação precisa da {need} ou mais nova (Ubuntu 22.04, Debian 12, Fedora 35, SteamOS 3 e mais novos têm). Atualizar o sistema resolve.",
  "check.host_probe_failed": "A verificação do computador não rodou (código de saída {code}).",
  "check.cpu_too_old": "Este processador não tem x86-64-v2 (SSE4.2, POPCNT e CMPXCHG16B), o nível mais antigo para o qual o jogo é compilado. Intel Nehalem (2008) ou AMD Bulldozer (2011) e mais novos têm.",
+ "check.cpu_too_old_arm": "Este processador não tem Armv8.2 com as operações atômicas LSE, RCpc e o produto escalar (dot product), o nível ARM mais antigo para o qual o jogo é compilado. Núcleos Cortex-A76 (Snapdragon 855, 2019), Apple M1 e mais novos têm.",
+ "check.cpu_level_unknown": "TOTK_CPU ou --cpu pede o nível de código '{cpu}', que a arquitetura deste processador não tem. Conhecidos: {known}.",
+ "check.cpu_level_unsupported": "TOTK_CPU ou --cpu pede o nível de código '{cpu}', mas este processador não o executa; ele executa: {levels}. Remova TOTK_CPU para a instalação escolher.",
+ "check.page_size": "Este sistema usa páginas de memória de {size} bytes; o jogo precisa de páginas de 4 KiB (4096 bytes), como o Switch. Use um kernel com páginas de 4 KiB (o Asahi Linux e alguns kernels do Raspberry Pi usam 16 KiB).",
  "check.vulkan_missing": "Nenhum driver Vulkan está instalado. Instale o driver mais recente da sua placa de vídeo.",
  "check.vulkan_no_device": "O Vulkan não encontra nenhuma placa de vídeo. Instale o driver mais recente da sua placa de vídeo.",
  "check.vulkan_too_old": "O jogo precisa de uma placa de vídeo com Vulkan 1.3; encontrado: {devices}. Atualize o driver de vídeo.",
@@ -105,7 +109,6 @@
  "warn.npdm_differs": "O main.npdm difere do dump de referência da versão {version}; só os módulos de código são usados.",
  "warn.xbox_prompts_failed": "Não foi possível preparar os ícones de botão do Xbox ou do PC (código de saída {code}); o jogo mantém os ícones do Switch. Detalhes: {log}",
  "warn.shaders_skipped": "O driver gráfico travou ao compilar alguns shaders, então {count} ficaram fora da preparação. O jogo os compila quando precisar deles pela primeira vez, e o driver pode travar ali também; uma atualização do driver pode resolver. Detalhes: {log}",
- "warn.kernel_old": "O Linux {version} não tem o rastreamento de escrita de que o jogo depende (6.7 ou mais novo); o jogo pode rodar muito devagar. Atualizar o sistema resolve.",
  "warn.dlss_kept": "Já existe uma biblioteca DLSS na pasta de instalação ({path}); a instalação a mantém.",
  "warn.dlss_download_failed": "Não foi possível baixar o NVIDIA DLSS de {url}: {detail}. O jogo funciona sem ele; a próxima execução da instalação tenta de novo.",
 

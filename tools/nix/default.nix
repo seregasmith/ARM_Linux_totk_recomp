@@ -104,14 +104,18 @@ rec {
 
   # build_game.py --deps for a Linux target: include/ (Vulkan headers newer than Ubuntu 22.04's, VMA, SDL3) and lib/
   # (libSDL3.so*, which the game finds beside itself through its $ORIGIN rpath; Opus, libvpx and zstd static, so the
-  # game needs no more than glibc, the system's Vulkan loader and that SDL3).
+  # game needs no more than glibc, the system's Vulkan loader and that SDL3). share/licenses/ holds the licences of
+  # SDL3 and the Vulkan headers for the setup AppImage (tools/make_release_linux.py collect_licenses); the Ubuntu
+  # packages' are in the sysroot's usr/share/doc.
   deps = pkgs.runCommand "totk-deps-${arch}" { } ''
-    mkdir -p $out/include/vma $out/lib
+    mkdir -p $out/include/vma $out/lib $out/share/licenses
     cp -r ${pkgs.vulkan-headers}/include/vulkan ${pkgs.vulkan-headers}/include/vk_video $out/include/
     cp ${pkgs.vulkan-memory-allocator}/include/vk_mem_alloc.h $out/include/vma/
     cp -r ${sdl3}/include/SDL3 $out/include/
     cp -P ${sdl3}/lib/libSDL3.so* $out/lib/
     for a in libopus libvpx libzstd; do cp ${sysroot}/usr/lib/${triple}/$a.a $out/lib/; done
+    cp ${sdl3.src}/LICENSE.txt $out/share/licenses/SDL3-LICENSE.txt
+    cp ${pkgs.vulkan-headers.src}/LICENSE.md $out/share/licenses/vulkan-headers-LICENSE.md
   '';
 
   # The front of an AppImage (tools/package_appimage.py, build_docker.sh appimage): AppImage's type-2 runtime, release

@@ -1,10 +1,19 @@
-// Host check of the installer's first step, compiled with the bundled clang at install time: does the CPU run
-// -march=x86-64-v3 code (or only x86-64-v2), and does a Vulkan 1.3 device exist. Prints one JSON object on stdout.
-// The Vulkan loader is opened at run time, so a machine without one gets "loader": false instead of a failed start.
-#include <cpuid.h>
+// Host check of the installer's first step, compiled with the bundled clang at install time. Prints one JSON object on
+// stdout:
+//   arch, levels, preferred: the code levels (tools/build_game.py CPU_LEVELS) this CPU runs, best first, and the one
+//     the setup builds unless asked for another. x86-64: v3 and v2 (also as x86_64_v3 and x86_64_v2). AArch64: a64 and
+//     oryon, from the HWCAP bits runtime/main.c check_cpu tests when the game starts; oryon is preferred only on
+//     Qualcomm's Oryon cores (oryon_cores), as -mcpu=oryon-1 also tunes the code for them.
+//   page_size, write_watch (Linux): the page size (the game needs 4 KiB pages) and whether userfaultfd's asynchronous
+//     write protection works (runtime/platform/linux.c; without it runtime/memory.c tracks writes per 2 MiB region).
+//   loader, instance, devices: does a Vulkan 1.3 device exist. The Vulkan loader is opened at run time, so a machine
+//     without one gets "loader": false instead of a failed start.
 #include <stdio.h>
 #include <string.h>
 #include <vulkan/vulkan.h>
+#if defined(__x86_64__) || defined(__i386__)
+#include <cpuid.h>
+#endif
 #ifdef _WIN32
 #include <windows.h>
 #define open_lib() LoadLibraryA("vulkan-1.dll")
@@ -13,6 +22,15 @@
 #include <dlfcn.h>
 #define open_lib() dlopen("libvulkan.so.1", RTLD_NOW)
 #define lib_sym(l, n) dlsym((l), (n))
+#endif
+#ifdef __linux__
+#include <fcntl.h>
+#include <linux/userfaultfd.h>
+#include <stdlib.h>
+#include <sys/auxv.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #endif
 
 static void json_string(const char *s) {
@@ -25,6 +43,7 @@ static void json_string(const char *s) {
     putchar('"');
 }
 
+#if defined(__x86_64__) || defined(__i386__)
 // The x86-64-v2 level from CPUID: SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, CMPXCHG16B and LAHF/SAHF. Every CPU with
 // SSE4.2 has the others, but the level is what the v2 build is compiled for, so check them all.
 static int x86_64_v2(void) {
@@ -57,9 +76,79 @@ static int x86_64_v3(void) {
     return (c & (1u << 5)) != 0;   // LZCNT (ABM)
 }
 
+static void cpu_json(void) {
+    int v2 = x86_64_v2(), v3 = x86_64_v3();
+    printf("\"arch\": \"x86_64\", \"x86_64_v2\": %s, \"x86_64_v3\": %s, \"levels\": [%s], \"preferred\": %s, ",
+           v2 ? "true" : "false", v3 ? "true" : "false", v3 ? "\"v3\", \"v2\"" : v2 ? "\"v2\"" : "",
+           v3 ? "\"v3\"" : v2 ? "\"v2\"" : "null");
+}
+#elif defined(__aarch64__) && defined(__linux__)
+// AT_HWCAP and AT_HWCAP2 bits of the Linux arm64 ABI (uapi asm/hwcap.h), spelled out for older headers as
+// runtime/main.c does
+enum { HWC_ASIMD = 1, HWC_ATOMICS = 8, HWC_LRCPC = 15, HWC_ASIMDDP = 20, HWC_USCAT = 25, HWC_ILRCPC = 26,
+       HWC_FLAGM = 27, HWC2_FLAGM2 = 7, HWC2_FRINT = 8, HWC2_I8MM = 13, HWC2_BF16 = 14 };
+#define HAS(word, bit) (((word) >> (bit)) & 1)
+
+// A core of Qualcomm's Oryon design: implementer 0x51 with part 0x001 (Snapdragon X) or 0x002 (Snapdragon 8 Elite), the
+// MIDR fields /proc/cpuinfo lists per core (runtime/sysinfo.c names them the same way).
+static int oryon_cores(void) {
+    FILE *f = fopen("/proc/cpuinfo", "r");
+    if (!f) return 0;
+    char line[256];
+    unsigned long impl = 0, found = 0;
+    while (fgets(line, sizeof line, f)) {
+        const char *colon = strchr(line, ':');
+        if (!colon) continue;
+        unsigned long v = strtoul(colon + 1, NULL, 0);
+        if (!strncmp(line, "CPU implementer", 15)) impl = v;
+        else if (!strncmp(line, "CPU part", 8) && impl == 0x51 && (v == 0x001 || v == 0x002)) found = 1;
+    }
+    fclose(f);
+    return (int)found;
+}
+
+static void cpu_json(void) {
+    unsigned long hw = getauxval(AT_HWCAP), hw2 = getauxval(AT_HWCAP2);
+    int a64 = HAS(hw, HWC_ASIMD) && HAS(hw, HWC_ATOMICS) && HAS(hw, HWC_LRCPC) && HAS(hw, HWC_ASIMDDP);
+    int oryon = a64 && HAS(hw, HWC_USCAT) && HAS(hw, HWC_ILRCPC) && HAS(hw, HWC_FLAGM) && HAS(hw2, HWC2_FLAGM2) &&
+                HAS(hw2, HWC2_FRINT) && HAS(hw2, HWC2_I8MM) && HAS(hw2, HWC2_BF16);
+    int cores = oryon_cores();
+    printf("\"arch\": \"aarch64\", \"levels\": [%s], \"preferred\": %s, \"oryon_cores\": %s, ",
+           oryon ? "\"oryon\", \"a64\"" : a64 ? "\"a64\"" : "",
+           oryon && cores ? "\"oryon\"" : a64 ? "\"a64\"" : "null", cores ? "true" : "false");
+}
+#else
+static void cpu_json(void) { printf("\"arch\": \"unknown\", \"levels\": [], \"preferred\": null, "); }
+#endif
+
+#ifdef __linux__
+// The write-watch ABI of Linux 6.7 (uapi linux/userfaultfd.h) for older headers, as runtime/platform/linux.c has it
+#ifndef UFFD_FEATURE_WP_ASYNC
+#define UFFD_FEATURE_WP_UNPOPULATED (1 << 13)
+#define UFFD_FEATURE_WP_ASYNC (1 << 15)
+#endif
+#ifndef UFFD_USER_MODE_ONLY
+#define UFFD_USER_MODE_ONLY 1
+#endif
+
+// The first test runtime/platform/linux.c makes before it relies on the kernel's write tracking: a userfaultfd that
+// takes asynchronous write protection. Kernels before 6.7, and kernels built without CONFIG_USERFAULTFD, fail it.
+static int write_watch(void) {
+    int fd = (int)syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY);
+    if (fd < 0) return 0;
+    struct uffdio_api api = {.api = UFFD_API, .features = UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED};
+    int ok = ioctl(fd, UFFDIO_API, &api) == 0;
+    close(fd);
+    return ok;
+}
+#endif
+
 int main(void) {
-    printf("{\"x86_64_v2\": %s, \"x86_64_v3\": %s, ", x86_64_v2() ? "true" : "false",
-           x86_64_v3() ? "true" : "false");
+    printf("{");
+    cpu_json();
+#ifdef __linux__
+    printf("\"page_size\": %ld, \"write_watch\": %s, ", sysconf(_SC_PAGESIZE), write_watch() ? "true" : "false");
+#endif
     void *lib = open_lib();
     PFN_vkGetInstanceProcAddr gipa = lib ? (PFN_vkGetInstanceProcAddr)lib_sym(lib, "vkGetInstanceProcAddr") : NULL;
     if (!gipa) {

@@ -49,7 +49,8 @@ loads the saves 1.4.3 wrote.
 1. **Check** before writing anything: an NSZ or XCZ input is unpacked first (below), the files open with the keys, the update is 1.1.0, 1.2.1 or 1.4.3 (by hash, as
    `tools/extract.py`), the keys are new enough for the update, enough space is free on the target disk (about 36 GiB at the peak of a
    first install, 20 GiB after it), the CPU is at least x86-64-v2 (SSE4.2; with AVX2/FMA the faster `v3` build is used,
-   otherwise the `v2` one), a Vulkan 1.3 GPU exists. Each failure is one clear message.
+   otherwise the `v2` one; on aarch64 `a64`, or `oryon` on Oryon cores; `--cpu` or `TOTK_CPU` picks another level the
+   CPU runs), a Vulkan 1.3 GPU exists. Each failure is one clear message.
 2. **Fonts** with Chinese, Korean or Traditional Chinese text and a firmware folder: extract the Switch system fonts
    from the firmware into `shared-fonts/` (MacNativeGames' `extract_shared_fonts.py`, which verifies every NCA layer
    and BFTTF header). Without a firmware folder the setup warns and goes on; the game then lacks those glyphs.
@@ -181,7 +182,8 @@ Xft against the sniper sysroot so Russian text uses system TrueType fonts. The s
 `libSDL3.so.0` beside it. The folder inside the AppImage:
 
 ```
-AppRun                starts python/bin/python3 -m installer.gui (no bytecode written into the read-only mount)
+AppRun                starts python/bin/python3 -m installer.gui (no bytecode written into the read-only mount); with
+                      --cli first, the command-line setup (python -m installer) with the rest of its arguments
 totk-setup.desktop, totk-setup.png
 installer/, recomp/, tools/, data/, licenses/, THIRD_PARTY_NOTICES.md, totk.ini.example, VERSION   as on Windows
 python/               python-build-standalone 3.14 (with tkinter) + the installer's packages; a .pth puts the folder,
@@ -205,10 +207,38 @@ bin/                  totk_xlate, hactool, ninja, libSDL3.so.0
   `MESA_SHADER_CACHE_DIR` is set, for the same reason: RADV fills its default folder in `~/.cache` up to 1 GB.
 - The window follows `LANG` for English or Russian, cancels through SIGTERM to the CLI's process group (the CLI handles
   it as Ctrl+Break on Windows) and opens the finished folder with `xdg-open`.
-- Requirements beyond Windows': Linux 6.7 or later (the write watch, `docs/building.md`) and glibc 2.34.
-- Building the release needs one game version extracted and lifted (`tools/extract.py`, `recomp/gen.py`, either
-  version): the runtime library includes the generated `layout.h`, whose shared part (`MOD_COUNT`, `MOD_MAIN_BASE`)
-  is the same for both. `tools/make_release.py` takes `generated/v121`, else `generated/v143`.
+- Requirements beyond Windows': glibc 2.34. Linux 6.7 or later gives the game the kernel's write watch
+  (`docs/building.md`); without it the game tracks writes per 2 MiB region, and the setup notes it in its log.
+- Building the release needs no game files. The runtime library includes the generated `layout.h`, but reads only
+  its part that follows from the module set (`MOD_COUNT`, `MOD_MAIN_BASE`), the same in every update:
+  `make_release_linux.py` compiles it against `recomp/layout.py` `write_runtime_only`'s `layout.h`, which holds only
+  that. Its `--prove` check still needs one game version extracted and lifted (`tools/extract.py`, `recomp/gen.py`):
+  `generated/v121`, else `generated/v143`. The Windows release (`tools/make_release.py`) still compiles the runtime
+  against a lifted version's `layout.h`.
+
+### aarch64
+
+`make_release_linux.py --arch aarch64` builds `TotK-Setup-aarch64.AppImage` for ARM64 Linux handhelds
+(`docs/ARM64_PORT_PLAN.md`, Phase 5); `./build_docker.sh setup` runs it on an arm64 Docker (Apple silicon). It is
+built on an aarch64 machine, since NativeAOT builds the translator for the machine it runs on. What differs:
+
+- **Downloads.** LLVM 23.1.4 `Linux-ARM64`, python-build-standalone `aarch64-unknown-linux-gnu`, `ninja-linux-aarch64`,
+  `appimagetool-aarch64` and the type-2 `runtime-aarch64`, pinned by hash like the x86-64 ones.
+- **Sysroot and libraries.** Steam's sniper SDK is x86-64 only. The release takes the Ubuntu 22.04 arm64 sysroot
+  (glibc 2.35) and the libraries of `tools/nix` (`--sysroot`, `--deps`): SDL3 built against that sysroot, Opus, libvpx
+  and zstd static, the Vulkan headers and VMA. The sysroot also carries Xft, fontconfig and FreeType for the Tk
+  rebuild. The game, hostcheck, hactool and the translator need glibc 2.35 (Ubuntu 22.04 and newer), and so does the
+  setup's check step.
+- **Code levels.** `runtime/libtotkrt.a` is the a64 build (Armv8.2 with LSE, RCpc and the dot product) and
+  `libtotkrt-oryon.a` the `-mcpu=oryon-1` one. The host check (`installer/hostcheck.c`) lists the levels the CPU runs
+  from the same HWCAP bits the game checks at start, and prefers oryon only on Qualcomm's Oryon cores (the Snapdragon
+  8 Elite). It also stops on a kernel whose pages are not 4 KiB.
+- **Choosing a level.** `TOTK_CPU=a64` or `oryon` when starting the AppImage (the window passes it to the CLI), or
+  `--cpu` in the command-line setup, builds that level instead; the check stops on a level this CPU cannot run. The
+  x86-64 setup takes `v3` or `v2` the same way.
+- **The device.** The window is Tk on X11 (XWayland under a Wayland session) and is used by touch; the command-line
+  setup is `./TotK-Setup-aarch64.AppImage --cli --base ... --update ... --keys ... --lang ... --dest ...`. Without
+  `/dev/fuse` the AppImage starts with `--appimage-extract-and-run`.
 
 ## Constraints
 

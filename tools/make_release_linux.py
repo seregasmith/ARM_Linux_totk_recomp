@@ -3,30 +3,48 @@
     .venv/bin/python tools/make_release_linux.py --out build/release/TotK-Setup-linux \\
         [--appimage build/release/TotK-Setup-x86_64.AppImage]
     .venv/bin/python tools/make_release_linux.py --out build/release/TotK-Setup-linux --prove
+    .venv/bin/python tools/make_release_linux.py --arch aarch64 --sysroot DIR --deps DIR --no-gpu \\
+        --out build/release/TotK-Setup-linux-aarch64 [--appimage build/release/TotK-Setup-aarch64.AppImage]
 
 The same model as the Windows release (tools/make_release.py, whose download cache, unpacking and checks this reuses): the
-folder carries the setup and a toolchain, never game code; the player's machine builds the game. Everything that runs on
-the player's machine is built against the Steam Runtime 3 "sniper" SDK sysroot (glibc 2.31), so the AppImage and the
-game it builds run on SteamOS and on any distribution at least as new. Needs network access on the first run, make,
-the .NET 10 SDK and Python 3.12+ with Pillow (.venv). The folder holds:
+folder carries the setup and a toolchain, never game code; the player's machine builds the game. Needs network access
+on the first run, make, the .NET 10 SDK and Python 3.12+ with Pillow (.venv).
+
+--arch picks the machines the release is for (default: this machine's). It is built on a machine of that architecture:
+NativeAOT builds the shader translator for the machine it runs on, and the checks run the folder's own programs.
+
+    x86_64   Everything that runs on the player's machine is built against the Steam Runtime 3 "sniper" SDK sysroot
+             (glibc 2.31), so the AppImage and the game it builds run on SteamOS and on any distribution at least as
+             new. The sysroot, Vulkan headers and zstd are pinned downloads.
+    aarch64  ARM64 Linux handhelds (docs/ARM64_PORT_PLAN.md, Phase 5): the Ubuntu 22.04 sysroot (glibc 2.35) and the
+             libraries of tools/nix (SDL3 built against it, Opus, libvpx and zstd static, the Vulkan headers, VMA),
+             passed as --sysroot and --deps (nix-build tools/nix -A sysroot / -A deps; build_docker.sh setup does it).
+
+The folder holds:
 
     python/    python-build-standalone 3.14 (with tkinter) + the packages of tools/requirements-installer.txt; a .pth
                file puts the folder, tools/ and recomp/ on sys.path
-    llvm/      LLVM 23 (clang, lld, llvm-ar, the clang resource headers) and llvm/sysroot: the files of the sniper SDK
-               sysroot the game's compile and link read, nothing else (recorded while building the runtime library)
-    runtime/   libtotkrt.a and libtotkrt-v2.a (build_game.py --make-runtime-lib --sysroot, x86-64-v3 and v2), the
-               runtime headers, romfs.c, patches.c and ov_zstd.c (compiled per install), totk.png (the window icon),
-               deps/ (Vulkan headers 1.4.363, VMA, zstd built static; SDL3, Opus and libvpx come from the sysroot)
-    bin/       totk_xlate (+ .id), hactool, ninja, libSDL3.so.0 (the sysroot's; the game finds it beside itself)
+    llvm/      LLVM 23 (clang, lld, llvm-ar, the clang resource headers) and llvm/sysroot: the files of the sysroot the
+               game's compile and link read, nothing else (recorded while building the runtime library)
+    runtime/   libtotkrt.a and libtotkrt-<level>.a (build_game.py --make-runtime-lib --sysroot: x86-64-v3 and v2, or
+               a64 and oryon), the runtime headers, romfs.c, patches.c and ov_zstd.c (compiled per install), totk.png
+               (the window icon), deps/ (x86_64: Vulkan headers 1.4.363, VMA, zstd built static, with SDL3, Opus and
+               libvpx from the sysroot; aarch64: --deps)
+    bin/       totk_xlate (+ .id), hactool, ninja, libSDL3.so.0 (the game finds it beside itself)
     recomp/, tools/, data/, installer/, licenses/, THIRD_PARTY_NOTICES.md, totk.ini.example, VERSION
-    AppRun, totk-setup.desktop, totk-setup.png   the AppImage entry: python/bin/python3 -m installer.gui
+    AppRun, totk-setup.desktop, totk-setup.png   the AppImage entry: python/bin/python3 -m installer.gui, or with
+               --cli as its first argument the command-line setup (python -m installer)
 
---appimage packs the folder with appimagetool and the static type-2 runtime (no libfuse2 on the host). --prove compiles
-the generated C and links build/release-linux-check/totk with the folder's tools only, then runs the probes beside it.
-Like tools/make_release.py, both need one game version extracted and lifted first (generated/v121, else v143).
+--appimage packs the folder with appimagetool and the static type-2 runtime (no libfuse2 on the host). The release
+needs no game files: the runtime libraries are compiled against a layout.h that holds only what the runtime reads, the
+module set (recomp/layout.py write_runtime_only). --prove, an optional check, compiles a lifted game version's C
+(generated/v121, else v143, and its build/extracted/<version>) and links build/release-linux-check/totk with the
+folder's tools only, then runs the probes beside it.
 
 The folder contains nothing derived from the game: check_content runs over it before the script finishes, then the
-folder's own python runs a check-only installer pass and the window's --selftest.
+folder's own python runs a check-only installer pass and the window's --selftest. --no-gpu is for a machine without a
+Vulkan device (a container): the installer pass may then stop at its Vulkan check instead of at the missing game
+files, and --prove runs only the probes that need no GPU.
 """
 import argparse
 import os
@@ -78,13 +96,64 @@ PINS = {
                      'ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0'),
     'appimage-runtime': ('https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64',
                          '2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d'),
+    # aarch64: the same releases built for ARM64 Linux
+    'llvm-linux-arm64': (f'https://github.com/llvm/llvm-project/releases/download/llvmorg-{LLVM_VERSION}/'
+                         f'LLVM-{LLVM_VERSION}-Linux-ARM64.tar.xz',
+                         '9b27cf263d711aa6ebfd4045ab241d947bd09b3cd19ffa5728f48a80c9eb3a91'),
+    'python-linux-arm64': ('https://github.com/astral-sh/python-build-standalone/releases/download/20261026/'
+                           'cpython-3.14.10%2B20261026-aarch64-unknown-linux-gnu-install_only.tar.gz',
+                           'dcc31ce7b9ddbbffac160da7fff0cc069054f43eca52382a7d0eebf94e985b88'),
+    'ninja-linux-arm64': ('https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-linux-aarch64.zip',
+                          'fd2cacc8050a7f12a16a2e48f9e06fca5c14fc4c2bee2babb67b58be17a607fc'),
+    'appimagetool-arm64': ('https://github.com/AppImage/appimagetool/releases/download/1.9.1/'
+                           'appimagetool-aarch64.AppImage',
+                           'f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158'),
+    # the same file tools/nix/default.nix appimageRuntime pins (build_docker.sh appimage)
+    'appimage-runtime-arm64': ('https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-aarch64',
+                               '00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444'),
 }
 mr.PINS.update(PINS)   # one cache (toolchain/release-dl) and one fetch for both releases
+
+# What differs between the target architectures: the pinned downloads (PINS names), the top folder of the LLVM
+# release, the glibc the folder may need at most (check_glibc) and how the sysroot comes (sniper: a pinned download;
+# nix: --sysroot and --deps from tools/nix).
+TARGETS = {
+    'x86_64': {'llvm': 'llvm-linux', 'llvm_top': f'LLVM-{LLVM_VERSION}-Linux-X64', 'python': 'python-linux',
+               'ninja': 'ninja-linux', 'appimagetool': 'appimagetool', 'runtime': 'appimage-runtime',
+               'glibc': (2, 34), 'sysroot': 'sniper'},
+    'aarch64': {'llvm': 'llvm-linux-arm64', 'llvm_top': f'LLVM-{LLVM_VERSION}-Linux-ARM64',
+                'python': 'python-linux-arm64', 'ninja': 'ninja-linux-arm64', 'appimagetool': 'appimagetool-arm64',
+                'runtime': 'appimage-runtime-arm64', 'glibc': (2, 35), 'sysroot': 'nix'},
+}
+ARCH = build_game.HOST_ARCH if build_game.HOST_ARCH in TARGETS else 'x86_64'   # set_arch replaces both
+TRIPLE = build_game.TRIPLES[ARCH]
+
+
+def set_arch(arch):
+    global ARCH, TRIPLE
+    ARCH, TRIPLE = arch, build_game.TRIPLES[arch]
+
+
+def per_arch(key):
+    """TARGETS[key] of the architecture the release is for (set_arch)."""
+    return TARGETS[ARCH][key]
+
+
+def rtlib_name(cpu):
+    """The runtime library of a code level: libtotkrt.a for the architecture's default (build_game.py DEFAULT_CPU),
+    libtotkrt-<level>.a for the others. installer/layout.py Layout.runtime_lib_for finds them by the same names."""
+    return 'libtotkrt.a' if cpu == build_game.DEFAULT_CPU[ARCH] else f'libtotkrt-{cpu}.a'
+
+
+def cpu_levels():
+    """The code levels the release ships, the default first (build_game.py CPU_LEVELS)."""
+    default = build_game.DEFAULT_CPU[ARCH]
+    return [default] + [c for c in build_game.CPU_LEVELS[ARCH] if c != default]
 
 # What clang, lld and the runtime build need from the LLVM release (the rest of its 8 GB stays packed).
 LLVM_MEMBERS = [f'bin/clang-{LLVM_MAJOR}', 'bin/clang', 'bin/clang++', 'bin/lld', 'bin/ld.lld', 'bin/llvm-ar',
                 'bin/llvm-ranlib', 'bin/llvm-objcopy', 'bin/llvm-strip', f'lib/clang/{LLVM_MAJOR}/include']
-# The parts of the sniper SDK a C/C++ compile and link for x86_64 can read.
+# The parts of the sniper SDK a C/C++ compile and link for x86_64 can read (x86_64 only).
 SNIPER_MEMBERS = ['usr/include', 'usr/share/pkgconfig', 'usr/lib/x86_64-linux-gnu', 'usr/lib/gcc/x86_64-linux-gnu',
                   'lib/x86_64-linux-gnu', 'lib64', 'usr/share/doc/libsdl3-0', 'usr/share/doc/libopus0',
                   'usr/share/doc/libvpx6', 'usr/share/doc/libc6', 'usr/share/doc/gcc-10-base',
@@ -121,8 +190,8 @@ def tar_extract(name, dest, members, strip=0):
 # ---- llvm/ and the sysroot -------------------------------------------------------------------------------------------
 
 def build_llvm(out):
-    top = f'LLVM-{LLVM_VERSION}-Linux-X64'
-    src = tar_extract('llvm-linux', WORK / 'llvm-linux', [f'{top}/{m}' for m in LLVM_MEMBERS], strip=1)
+    top = per_arch('llvm_top')
+    src = tar_extract(per_arch('llvm'), WORK / per_arch('llvm'), [f'{top}/{m}' for m in LLVM_MEMBERS], strip=1)
     dst = out / 'llvm'
     shutil.copytree(src, dst, symlinks=True, ignore=shutil.ignore_patterns('.unpacked'))
     strip(dst / 'bin', dst / 'bin' / 'llvm-strip')
@@ -140,9 +209,15 @@ def strip(where, tool):
             subprocess.run([str(tool), '--strip-unneeded', str(p)], check=True)
 
 
-def full_sysroot():
-    """The sniper SDK's x86_64 compile and link files in toolchain/release-work/sniper, absolute symlinks made relative
-    (the SDK points some at /lib and /usr/lib, which outside its container are the host's)."""
+def full_sysroot(given=None):
+    """x86_64: the sniper SDK's compile and link files in toolchain/release-work/sniper, absolute symlinks made relative
+    (the SDK points some at /lib and /usr/lib, which outside its container are the host's). aarch64: the --sysroot
+    tools/nix built, whose links are relative already."""
+    if per_arch('sysroot') == 'nix':
+        if not given or not (given / 'usr' / 'include' / 'stdio.h').is_file():
+            sys.exit(f'--arch {ARCH} needs --sysroot: the Ubuntu 22.04 sysroot of tools/nix '
+                     f'(nix-build tools/nix -A sysroot --argstr arch {ARCH})')
+        return given.resolve()
     root = WORK / 'sniper'
     if (root / '.relinked').is_file() and (root / 'usr/share/doc/libxft2/copyright').is_file():
         return root
@@ -160,13 +235,30 @@ def full_sysroot():
 
 
 def sysroot_cc(llvm, sysroot):
-    return f'{llvm / "bin" / "clang"} --target=x86_64-linux-gnu --sysroot={sysroot} -fuse-ld=lld'
+    return f'{llvm / "bin" / "clang"} --target={TRIPLE} --sysroot={sysroot} -fuse-ld=lld'
+
+
+def copy_writable(src, dst):
+    """copytree with symlinks kept, then every directory and file made writable by the owner: files from the Nix store
+    are read-only, and a read-only folder would stop the next run's rmtree of the release folder."""
+    shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True)
+    for p in [dst, *dst.rglob('*')]:
+        if not p.is_symlink():
+            p.chmod(p.stat().st_mode | 0o200)
 
 
 # ---- runtime/deps, bin/ --------------------------------------------------------------------------------------------
 
-def build_deps(out, llvm, sysroot):
+def build_deps(out, llvm, sysroot, deps=None):
     d = out / 'runtime' / 'deps'
+    if per_arch('sysroot') == 'nix':
+        # tools/nix deps: include/ (Vulkan headers, VMA, SDL3) and lib/ (libSDL3.so*, libopus.a, libvpx.a, libzstd.a)
+        if not deps or not (deps / 'include' / 'vma' / 'vk_mem_alloc.h').is_file():
+            sys.exit(f'--arch {ARCH} needs --deps: the libraries of tools/nix '
+                     f'(nix-build tools/nix -A deps --argstr arch {ARCH})')
+        for sub in ('include', 'lib'):
+            copy_writable(deps / sub, d / sub)
+        return
     (d / 'include' / 'vma').mkdir(parents=True, exist_ok=True)
     (d / 'lib').mkdir(parents=True, exist_ok=True)
     vk = tar_extract('vulkan-headers-src', WORK / 'vulkan-headers', ['Vulkan-Headers-1.4.363/include',
@@ -187,7 +279,7 @@ def build_deps(out, llvm, sysroot):
 def build_bin(out, llvm, sysroot):
     b = out / 'bin'
     b.mkdir(parents=True, exist_ok=True)
-    zip_dir = mr.unpack('ninja-linux')
+    zip_dir = mr.unpack(per_arch('ninja'))
     shutil.copy2(zip_dir / 'ninja', b / 'ninja')
     (b / 'ninja').chmod(0o755)
     hac = WORK / 'hactool-linux'
@@ -198,23 +290,42 @@ def build_bin(out, llvm, sysroot):
     run([sys.executable, ROOT / 'tools' / 'build_xlate.py', '--out', xl, '--llvm', llvm, '--sysroot', sysroot])
     shutil.copy2(xl / 'totk_xlate', b / 'totk_xlate')
     shutil.copy2(xl / 'totk_xlate.id', b / 'totk_xlate.id')
-    sdl = (sysroot / 'usr' / 'lib' / 'x86_64-linux-gnu' / 'libSDL3.so.0').resolve()
-    shutil.copy2(sdl, b / 'libSDL3.so.0')
+    # SDL3: the sniper sysroot's on x86_64, tools/nix's (copied into runtime/deps by build_deps) on aarch64
+    sdl_dir = sysroot / 'usr' / 'lib' / TRIPLE if per_arch('sysroot') == 'sniper' else out / 'runtime' / 'deps' / 'lib'
+    shutil.copy2((sdl_dir / 'libSDL3.so.0').resolve(), b / 'libSDL3.so.0')
 
 
 # ---- runtime/ ----------------------------------------------------------------------------------------------------------
 
+def runtime_layout():
+    """(version, generated folder) the runtime libraries are compiled against, without game files. The runtime reads
+    only MOD_COUNT and MOD_MAIN_BASE of the generated layout.h, which follow from the module set alone, the same in
+    every supported update: recomp/layout.py write_runtime_only writes that layout.h from the module names of 1.2.1's
+    expected hashes (tools/data). A runtime file that reads another base or a size fails to compile against it."""
+    sys.path.insert(0, str(ROOT / 'recomp'))
+    import json
+    import layout
+    names = json.loads((ROOT / 'tools' / 'data' / 'expected-v1.2.1.json').read_text(encoding='utf-8'))['exefs_sha256']
+    gen = CHECK / 'layout-runtime-only'
+    shutil.rmtree(gen, ignore_errors=True)
+    mods = layout.write_runtime_only(names, gen)
+    print(f'runtime layout: {", ".join(mods)}, from the expected hashes ({gen})')
+    return 'v121', gen
+
+
 def runtime_lib(out, llvm, sysroot):
-    """libtotkrt.a (x86-64-v3) and libtotkrt-v2.a (x86-64-v2), so a machine without AVX2 can install too."""
-    version = mr.lifted_version()
+    """One runtime library per code level (cpu_levels): libtotkrt.a (x86-64-v3) and libtotkrt-v2.a (x86-64-v2), so a
+    machine without AVX2 can install too; on aarch64 libtotkrt.a (a64) and libtotkrt-oryon.a (the Snapdragon 8 Elite's
+    cores). Returns the last level's build folder, whose dependency files used_sysroot_files reads."""
+    version, gen = runtime_layout()
     rt = out / 'runtime'
-    for cpu, name in (('v3', 'libtotkrt.a'), ('v2', 'libtotkrt-v2.a')):
+    for cpu in cpu_levels():
         build = CHECK / f'rtlib-{cpu}'
         shutil.rmtree(build, ignore_errors=True)
-        run([sys.executable, ROOT / 'tools' / 'build_game.py', '--make-runtime-lib', '--toolchain', llvm,
-             '--sysroot', sysroot, '--cpu', cpu, '--deps', out / 'runtime' / 'deps', '--ninja', out / 'bin' / 'ninja',
-             '--version', version, '--gen', MAIN_ROOT / 'generated' / version, '--out', build])
-        shutil.copy2(build / 'libtotkrt.a', rt / name)
+        run([sys.executable, ROOT / 'tools' / 'build_game.py', '--make-runtime-lib', '--arch', ARCH,
+             '--toolchain', llvm, '--sysroot', sysroot, '--cpu', cpu, '--deps', out / 'runtime' / 'deps',
+             '--ninja', out / 'bin' / 'ninja', '--version', version, '--gen', gen, '--out', build])
+        shutil.copy2(build / 'libtotkrt.a', rt / rtlib_name(cpu))
     for p in sorted((ROOT / 'runtime').rglob('*')):
         if p.suffix in mr.RUNTIME_SUFFIXES and p.is_file():
             (rt / p.relative_to(ROOT / 'runtime')).parent.mkdir(parents=True, exist_ok=True)
@@ -238,7 +349,7 @@ def used_sysroot_files(out, llvm, sysroot, rtlib_build):
     probe = CHECK / 'sysroot-probe'
     shutil.rmtree(probe, ignore_errors=True)
     probe.mkdir(parents=True)
-    cc = [llvm / 'bin' / 'clang', '--target=x86_64-linux-gnu', f'--sysroot={sysroot}', '-I', out / 'runtime',
+    cc = [llvm / 'bin' / 'clang', f'--target={TRIPLE}', f'--sysroot={sysroot}', '-I', out / 'runtime',
           '-I', out / 'runtime' / 'deps' / 'include', '-I', CHECK / 'rtlib']
     for i, src in enumerate([*(out / 'runtime' / n for n in sorted(build_game.INSTALL_SIDE)),
                              ROOT / 'installer' / 'hostcheck.c']):
@@ -248,7 +359,7 @@ def used_sysroot_files(out, llvm, sysroot, rtlib_build):
         if (probe / f'{i}.d').is_file():
             used.update(re.findall(r'\S+', (probe / f'{i}.d').read_text().replace('\\\n', ' ')))
     trace = subprocess.run([str(c) for c in [
-        llvm / 'bin' / 'clang', '--target=x86_64-linux-gnu', f'--sysroot={sysroot}', *build_game.LINK_FLAGS[:3],
+        llvm / 'bin' / 'clang', f'--target={TRIPLE}', f'--sysroot={sysroot}', *build_game.LINK_FLAGS[:3],
         '-Wl,--trace', '-Wl,--unresolved-symbols=ignore-all', '-Wl,--whole-archive', out / 'runtime' / 'libtotkrt.a',
         '-Wl,--no-whole-archive', '-L', out / 'runtime' / 'deps' / 'lib',
         *RELEASE_LIBS, '-o', probe / 'trace.out']],
@@ -269,23 +380,35 @@ def used_sysroot_files(out, llvm, sysroot, rtlib_build):
     # variants pull in bits/stdio.h and others), and the setup compiles the generated code, hostcheck and the
     # install-side sources with flags of its own
     inc = sysroot / 'usr' / 'include'
-    arch = inc / 'x86_64-linux-gnu'
+    arch = inc / TRIPLE
     files.update(p for p in [*inc.glob('*.h'), *arch.glob('*.h')] if p.is_file())
     for d in (arch / 'bits', arch / 'sys', arch / 'gnu', arch / 'asm', inc / 'linux', inc / 'asm-generic'):
         files.update(p for p in d.rglob('*') if p.is_file() or p.is_symlink())
     # The C runtime whole, for PIE links (hostcheck) as well as the game's: lld's trace names the libraries a link
     # script loads but not the script (libc.so, libm.so, libgcc_s.so), and clang's GCC detection needs the crt objects
-    lib = sysroot / 'usr' / 'lib' / 'x86_64-linux-gnu'
+    lib = sysroot / 'usr' / 'lib' / TRIPLE
     for name in GLIBC_LIBS:
         files.update(p for p in lib.glob(f'lib{name}[._]*') if p.suffix in ('.so', '.a') or '.so' in p.name)
-        files.update(p for p in (sysroot / 'lib' / 'x86_64-linux-gnu').glob(f'lib{name}.so*'))
+        files.update(p for p in (sysroot / 'lib' / TRIPLE).glob(f'lib{name}.so*'))
     files.update(lib.glob('*crt*.o'))
+    # the dynamic loader: /lib64/ld-linux-x86-64.so.2 on x86_64, /lib/ld-linux-aarch64.so.1 on aarch64
     files.update((sysroot / 'lib64').glob('ld-linux*'))
-    files.update((sysroot / 'lib' / 'x86_64-linux-gnu').glob('ld-linux*'))
-    files.update((sysroot / 'lib' / 'x86_64-linux-gnu').glob('libgcc_s.so*'))
-    gcc = next((sysroot / 'usr' / 'lib' / 'gcc' / 'x86_64-linux-gnu').iterdir())
+    files.update((sysroot / 'lib').glob('ld-linux*'))
+    files.update((sysroot / 'lib' / TRIPLE).glob('ld-linux*'))
+    files.update((sysroot / 'lib' / TRIPLE).glob('libgcc_s.so*'))
+    gcc = gcc_dir(sysroot)
     files.update(p for p in gcc.iterdir() if p.name.startswith('crt') or p.name in GCC_LIBS)
     return files
+
+
+def gcc_dir(sysroot):
+    """The GCC version folder clang links with (crtbegin.o, libgcc.a, libstdc++): the newest one holding crtbegin.o, as
+    clang's own GCC detection picks it. A sysroot may hold more version folders than the one with the C runtime."""
+    root = sysroot / 'usr' / 'lib' / 'gcc' / TRIPLE
+    found = [d for d in root.iterdir() if (d / 'crtbegin.o').is_file()] if root.is_dir() else []
+    if not found:
+        sys.exit(f'{root}: no GCC folder with crtbegin.o')
+    return max(found, key=lambda d: [int(x) if x.isdigit() else 0 for x in d.name.split('.')])
 
 
 def link_chain(path):
@@ -325,7 +448,7 @@ def build_tk_xft(out, llvm, sysroot):
     env = dict(os.environ, CC=sysroot_cc(llvm, sysroot),
                PKG_CONFIG_SYSROOT_DIR=str(sysroot),
                PKG_CONFIG_LIBDIR=os.pathsep.join(str(sysroot / p) for p in
-                   ('usr/lib/x86_64-linux-gnu/pkgconfig', 'usr/share/pkgconfig')),
+                   (f'usr/lib/{TRIPLE}/pkgconfig', 'usr/share/pkgconfig')),
                PKG_CONFIG_PATH='')
     sources = {}
     for name in ('tcl', 'tk'):
@@ -349,7 +472,7 @@ def build_tk_xft(out, llvm, sysroot):
         shutil.copy2(lib / name, dst / name)
     # libXft is not on every desktop (the old Tk did not need it) and without it _tkinter fails to import, so the
     # window would not open at all. python's RPATH ($ORIGIN/../lib) finds these beside the Tk library.
-    sys_lib = sysroot / 'usr' / 'lib' / 'x86_64-linux-gnu'
+    sys_lib = sysroot / 'usr' / 'lib' / TRIPLE
     for pattern in ('libXft.so.2*', 'libXrender.so.1*'):
         for f in sys_lib.glob(pattern):
             shutil.copy2(f, dst / f.name, follow_symlinks=False)
@@ -363,7 +486,7 @@ def build_tk_xft(out, llvm, sysroot):
 
 
 def build_python(out, llvm, sysroot):
-    src = mr.unpack('python-linux') / 'python'
+    src = mr.unpack(per_arch('python')) / 'python'
     py = out / 'python'
     shutil.copytree(src, py, symlinks=True,
                     ignore=shutil.ignore_patterns('test', 'idlelib', 'turtledemo', '__pycache__', '*.a'))
@@ -388,22 +511,32 @@ def build_python(out, llvm, sysroot):
 
 # ---- licences, AppImage entry ------------------------------------------------------------------------------------------
 
-def collect_licenses(out, sysroot):
+def collect_licenses(out, sysroot, deps=None):
     lic = out / 'licenses'
     lic.mkdir(parents=True, exist_ok=True)
     doc = sysroot / 'usr' / 'share' / 'doc'
+    # libstdc++ is linked static from the sysroot's GCC (10 in sniper, 11 in Ubuntu 22.04); libvpx is libvpx6 in sniper,
+    # libvpx7 in Ubuntu 22.04
+    gcc_base = f'gcc-{gcc_dir(sysroot).name.split(".")[0]}-base'
+    vpx = sorted(doc.glob('libvpx[0-9]*'))
+    if per_arch('sysroot') == 'sniper':
+        own = [(doc / 'libsdl3-0' / 'copyright', 'SDL3-copyright.txt'),
+               (WORK / 'vulkan-headers' / 'LICENSE.md', 'vulkan-headers-LICENSE.txt'),
+               (WORK / 'zstd' / 'LICENSE', 'zstd-LICENSE.txt')]
+    else:   # tools/nix deps: SDL3 and the Vulkan headers from their sources, zstd from Ubuntu's package
+        own = [(deps / 'share' / 'licenses' / 'SDL3-LICENSE.txt', 'SDL3-LICENSE.txt'),
+               (deps / 'share' / 'licenses' / 'vulkan-headers-LICENSE.md', 'vulkan-headers-LICENSE.txt'),
+               (doc / 'libzstd1' / 'copyright', 'zstd-copyright.txt')]
     pairs = [
         (mr.fetch('llvm-license'), 'llvm-LICENSE.txt'),
-        (doc / 'libsdl3-0' / 'copyright', 'SDL3-copyright.txt'),
+        *own,
         (doc / 'libopus0' / 'copyright', 'opus-copyright.txt'),
-        (doc / 'libvpx6' / 'copyright', 'libvpx-copyright.txt'),
+        ((vpx[-1] if vpx else doc / 'libvpx') / 'copyright', 'libvpx-copyright.txt'),
         (doc / 'libc6' / 'copyright', 'glibc-copyright.txt'),
-        (doc / 'gcc-10-base' / 'copyright', 'libstdc++-copyright.txt'),
+        (doc / gcc_base / 'copyright', 'libstdc++-copyright.txt'),
         (doc / 'libvulkan1' / 'copyright', 'vulkan-loader-copyright.txt'),
         (doc / 'libxft2' / 'copyright', 'libXft-copyright.txt'),
         (doc / 'libxrender1' / 'copyright', 'libXrender-copyright.txt'),
-        (WORK / 'vulkan-headers' / 'LICENSE.md', 'vulkan-headers-LICENSE.txt'),
-        (WORK / 'zstd' / 'LICENSE', 'zstd-LICENSE.txt'),
         (out / 'python' / 'lib' / f'python{sys_version(out)}' / 'LICENSE.txt', 'python-LICENSE.txt'),
         (ROOT / 'runtime' / 'shaders' / 'ffx' / 'LICENSE.txt', 'FidelityFX-FSR-LICENSE.txt'),
         (WORK / 'hactool-linux' / 'LICENSE', 'hactool-LICENSE.txt'),
@@ -424,10 +557,15 @@ def sys_version(out):
 
 APPRUN = '''#!/bin/sh
 # The AppImage entry: the setup window, run by the bundled Python from the read-only mount (no bytecode written there).
+# With --cli as the first argument, the command-line setup instead (installer/cli.py: python -m installer --help).
 HERE="$(dirname "$(readlink -f "$0")")"
 export PYTHONDONTWRITEBYTECODE=1
 export TCL_LIBRARY="$HERE/python/lib/tcl9.0"
 export TK_LIBRARY="$HERE/python/lib/tk9.0"
+if [ "${1:-}" = --cli ]; then
+    shift
+    exec "$HERE/python/bin/python3" -m installer --root "$HERE" "$@"
+fi
 exec "$HERE/python/bin/python3" -m installer.gui "$@"
 '''
 
@@ -451,25 +589,27 @@ def build_entry(out):
 
 
 def write_appimage(out, path):
-    tool = mr.fetch('appimagetool')
+    tool = mr.fetch(per_arch('appimagetool'))
     tool.chmod(0o755)
-    runtime = mr.fetch('appimage-runtime')
+    runtime = mr.fetch(per_arch('runtime'))
     path.parent.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, ARCH='x86_64', APPIMAGE_EXTRACT_AND_RUN='1')
+    env = dict(os.environ, ARCH=ARCH, APPIMAGE_EXTRACT_AND_RUN='1')
     run([tool, '--no-appstream', '--runtime-file', runtime, out, path], env=env)
     print(f'{path}: {mr.mib(path.stat().st_size)}')
 
 
 # ---- checks -------------------------------------------------------------------------------------------------------------
 
-# The newest glibc any program or library in the folder may need: the official LLVM binaries and the cryptography
-# wheel are built against 2.34 (Ubuntu 22.04, Debian 12, SteamOS 3 have it); the game itself links the sysroot's 2.31.
-GLIBC_FLOOR = (2, 34)
+# The newest glibc any program or library in the folder may need (TARGETS glibc). x86_64: the official LLVM binaries
+# and the cryptography wheel are built against 2.34 (Ubuntu 22.04, Debian 12, SteamOS 3 have it); the game itself links
+# the sniper sysroot's 2.31. aarch64: the LLVM binaries need 2.34 too, and what is built against the Ubuntu 22.04
+# sysroot (the game, hactool, totk_xlate, SDL3) may use its 2.35 (installer/steps.py GLIBC_NEEDED).
 
 
 def check_glibc(out):
-    """Every ELF file in the folder (llvm/sysroot aside: glibc itself, read by the link) needs glibc GLIBC_FLOOR or
+    """Every ELF file in the folder (llvm/sysroot aside: glibc itself, read by the link) needs the glibc of TARGETS or
     older; prints which files set the floor."""
+    limit = per_arch('glibc')
     newest, by = (0, 0), []
     for p in sorted(out.rglob('*')):
         if not p.is_file() or p.is_symlink() or out / 'llvm' / 'sysroot' in p.parents:
@@ -484,20 +624,27 @@ def check_glibc(out):
             newest, by = need, []
         if need == newest:
             by.append(str(p.relative_to(out)))
-    floor = '.'.join(map(str, GLIBC_FLOOR))
-    if newest > GLIBC_FLOOR:
+    floor = '.'.join(map(str, limit))
+    if newest > limit:
         sys.exit(f'glibc check: {", ".join(by[:8])} need glibc {".".join(map(str, newest))}, above {floor}')
     print(f'glibc check: the folder needs glibc {".".join(map(str, newest))} (floor {floor}), set by '
           f'{", ".join(by[:6])}{" and others" if len(by) > 6 else ""}')
 
 
-def check_bundle(out):
-    """The folder's own python runs the installer without game files and the window's selftest."""
+# Where the check-only installer pass of a machine without a Vulkan device (--no-gpu) stops: its host check, after the
+# toolchain compiled and ran installer/hostcheck.c
+NO_GPU_ERRORS = {'check.vulkan_missing', 'check.vulkan_no_device', 'check.vulkan_too_old'}
+
+
+def check_bundle(out, gpu=True):
+    """The folder's own python runs the installer without game files and the window's selftest. Without a GPU
+    (gpu False) the installer may stop at its Vulkan check instead of at the game files."""
     import json
     chk = CHECK / 'bundle'
     shutil.rmtree(chk, ignore_errors=True)
     py = out / 'python' / 'bin' / 'python3'
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
+    env.pop('TOTK_CPU', None)   # a build's code level (build_docker.sh passes it on) is no request to the setup
     r = subprocess.run([str(py), '-m', 'installer', '--lang', 'en-US', '--dest', str(chk / 'install'), '--temp',
                         str(chk / 'temp'), '--root', str(out)], cwd='/', env=env, capture_output=True, text=True,
                        timeout=600)
@@ -505,11 +652,17 @@ def check_bundle(out):
     errors = [e['id'] for e in events if e['type'] == 'error']
     started = any(e['type'] == 'start' and e.get('release') == (out / 'VERSION').read_text().strip() for e in events)
     steps = [e['phase'] for e in events if e['type'] == 'progress']
-    if errors != ['check.inputs_needed'] or not started or 'inputs' not in steps:
+    at_inputs = errors == ['check.inputs_needed'] and 'inputs' in steps
+    at_vulkan = not gpu and len(errors) == 1 and errors[0] in NO_GPU_ERRORS and 'host' in steps
+    if not (at_inputs or at_vulkan) or not started:
         sys.exit(f'bundle check: exit {r.returncode}, errors {errors}, release read {started}\n{r.stdout[-2000:]}\n'
                  f'{r.stderr[-2000:]}')
-    print(f'bundle check: the installer ran the host check from the folder and stopped at the game files '
-          f'(exit {r.returncode})')
+    if at_inputs:
+        print(f'bundle check: the installer ran the host check from the folder and stopped at the game files '
+              f'(exit {r.returncode})')
+    else:
+        print(f'bundle check: the installer compiled and ran the host check from the folder and stopped at '
+              f'{errors[0]}, as on a machine without a Vulkan device (--no-gpu; exit {r.returncode})')
     run([py, '-c', 'import tkinter as tk; from tkinter import font; '
          'root = tk.Tk(); root.withdraw(); '
          'fonts = [font.nametofont("TkDefaultFont"), font.Font(family="DejaVu Sans"), '
@@ -523,8 +676,15 @@ def check_bundle(out):
     print('bundle check: the window built every screen in both languages and closed')
 
 
-def prove(out, cpu='v3'):
-    """Compile the generated C and link totk with the folder's tools only, then run the probes beside it."""
+# The probes that need no Vulkan device (--no-gpu): the self-test and the kernel probe
+CPU_PROBES = ['--selftest', '--probe-kernel']
+
+
+def prove(out, cpu=None, gpu=True, run_probes=True, run_with=()):
+    """Compile the generated C and link totk with the folder's tools only, then run the probes beside it: all of them,
+    the CPU ones without a GPU (gpu False), none with run_probes False (a code level this machine cannot run). run_with
+    goes before the exe, as a loader that gives it the sysroot's libraries in a container without them."""
+    cpu = cpu or build_game.DEFAULT_CPU[ARCH]
     out = out.resolve()
     version = mr.lifted_version()
     gen = MAIN_ROOT / 'generated' / version
@@ -532,9 +692,10 @@ def prove(out, cpu='v3'):
     chk = CHECK / 'game'
     env = dict(os.environ, PATH=os.pathsep.join([str(out / 'llvm' / 'bin'), str(out / 'bin'), '/usr/bin', '/bin']))
     t0 = time.time()
-    run([out / 'python' / 'bin' / 'python3', out / 'tools' / 'build_game.py', '--toolchain', out / 'llvm', '--cpu', cpu,
+    run([out / 'python' / 'bin' / 'python3', out / 'tools' / 'build_game.py', '--toolchain', out / 'llvm',
+         '--arch', ARCH, '--cpu', cpu,
          '--sysroot', out / 'llvm' / 'sysroot', '--deps', out / 'runtime' / 'deps', '--runtime', out / 'runtime',
-         '--runtime-lib', out / 'runtime' / ('libtotkrt-v2.a' if cpu == 'v2' else 'libtotkrt.a'),
+         '--runtime-lib', out / 'runtime' / rtlib_name(cpu),
          '--ninja', out / 'bin' / 'ninja', '--version', version,
          '--gen', gen, '--out', chk, '--exefs', ext / 'exefs', '--romfs', ext / 'romfs', '--profile', chk / 'profile'],
         env=env)
@@ -546,9 +707,12 @@ def prove(out, cpu='v3'):
                                                                          capture_output=True, text=True).stdout)),
                    key=lambda v: tuple(map(int, v.split('.'))))
     print(f'prove: newest glibc symbol version {glibc[-1] if glibc else "none"}')
+    if not run_probes:
+        print(f'prove: {cpu} built and linked; its probes are not run here')
+        return
     failed = []
-    for probe in ['--selftest', *mr.PROBES]:
-        r = subprocess.run([str(chk / 'totk'), probe], cwd=chk, capture_output=True, text=True, timeout=900)
+    for probe in ['--selftest', *mr.PROBES] if gpu else CPU_PROBES:
+        r = subprocess.run([*run_with, str(chk / 'totk'), probe], cwd=chk, capture_output=True, text=True, timeout=900)
         tail = (r.stdout.strip().splitlines() or [''])[-1]
         print(f'{probe}: exit {r.returncode}: {tail}')
         if r.returncode:
@@ -562,29 +726,48 @@ def main():
     ap.add_argument('--out', type=Path, required=True, help='release folder (replaced)')
     ap.add_argument('--appimage', type=Path, help='also pack the folder as this AppImage')
     ap.add_argument('--prove', action='store_true', help='only run the compile-and-probe check on an existing folder')
-    ap.add_argument('--cpu', choices=('v2', 'v3'), default='v3',
-                    help='--prove: build and run the check for this CPU level (default v3)')
+    ap.add_argument('--arch', choices=sorted(TARGETS), default=ARCH,
+                    help=f'the machines the release is for (default: this one, {build_game.HOST_ARCH}); it is built on '
+                         'one of them')
+    ap.add_argument('--sysroot', type=Path, help='aarch64: the Ubuntu 22.04 sysroot of tools/nix (-A sysroot)')
+    ap.add_argument('--deps', type=Path, help='aarch64: the libraries of tools/nix (-A deps)')
+    ap.add_argument('--cpu', help='--prove: build and run the check for this code level (default: the architecture\'s '
+                                  'default, v3 or a64)')
+    ap.add_argument('--no-gpu', action='store_true',
+                    help='no Vulkan device here (a container): the installer pass may stop at its Vulkan check, and '
+                         '--prove runs only the probes that need no GPU')
+    ap.add_argument('--no-run', action='store_true', help='--prove: build and link only (a level this CPU cannot run)')
+    ap.add_argument('--run-with', default='', help='--prove: a command line put before the exe when a probe runs, such '
+                                                   'as the sysroot\'s loader with --library-path')
     args = ap.parse_args()
+    if args.arch != build_game.HOST_ARCH:
+        sys.exit(f'make_release_linux: a release for {args.arch} is built on {args.arch} (this machine is '
+                 f'{build_game.HOST_ARCH}): NativeAOT and the checks run the target\'s programs')
+    set_arch(args.arch)
+    if args.cpu and args.cpu not in build_game.CPU_LEVELS[ARCH]:
+        sys.exit(f'--cpu {args.cpu}: the code levels of {ARCH} are {", ".join(cpu_levels())}')
     out = args.out.resolve()
     if args.prove:
-        prove(out, args.cpu)
+        import shlex
+        prove(out, args.cpu, gpu=not args.no_gpu, run_probes=not args.no_run, run_with=shlex.split(args.run_with))
         return
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
+    deps = args.deps.resolve() if args.deps else None
     llvm = build_llvm(out)
-    sysroot = full_sysroot()
-    build_deps(out, llvm, sysroot)
+    sysroot = full_sysroot(args.sysroot)
+    build_deps(out, llvm, sysroot, deps)
     build_bin(out, llvm, sysroot)
     rtlib = runtime_lib(out, llvm, sysroot)
     build_sysroot(out, sysroot, used_sysroot_files(out, llvm, sysroot, rtlib))
     build_python(out, llvm, sysroot)
     mr.build_sources(out, {})   # no profiles: the Linux setup compiles without one (installer/layout.py, pgo_dir)
-    collect_licenses(out, sysroot)
+    collect_licenses(out, sysroot, deps)
     build_entry(out)
     mr.check_folder(out)
     check_glibc(out)
-    check_bundle(out)
+    check_bundle(out, gpu=not args.no_gpu)
     mr.sizes(out)
     if args.appimage:
         write_appimage(out, args.appimage.resolve())

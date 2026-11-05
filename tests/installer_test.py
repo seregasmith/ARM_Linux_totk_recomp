@@ -651,5 +651,60 @@ class DlssTest(unittest.TestCase):
         self.assertEqual(self.warnings(), [])
 
 
+class CpuLevelTest(unittest.TestCase):
+    """The code level the setup builds for: the host check's preferred one, or --cpu / TOTK_CPU when this CPU runs it
+    (steps.py Check.cpu_level, installer/hostcheck.c)."""
+
+    X86 = {'arch': 'x86_64', 'x86_64_v2': True, 'x86_64_v3': True, 'levels': ['v3', 'v2'], 'preferred': 'v3'}
+    ORYON = {'arch': 'aarch64', 'levels': ['oryon', 'a64'], 'preferred': 'oryon', 'oryon_cores': True}
+    APPLE = {'arch': 'aarch64', 'levels': ['oryon', 'a64'], 'preferred': 'a64', 'oryon_cores': False}
+    A76 = {'arch': 'aarch64', 'levels': ['a64'], 'preferred': 'a64', 'oryon_cores': False}
+
+    def level(self, host, cpu=None, env=''):
+        ctx = SimpleNamespace(options=SimpleNamespace(cpu=cpu), reporter=Reporter(out=io.StringIO()))
+        self.addCleanup(ctx.reporter.close)
+        with mock.patch.dict(steps.os.environ, {'TOTK_CPU': env}):
+            return steps.Check.cpu_level(ctx, host)
+
+    def error(self, host, **kw):
+        with self.assertRaises(runner.InstallError) as e:
+            self.level(host, **kw)
+        return e.exception.id
+
+    def test_preferred_level(self):
+        self.assertEqual(self.level(self.X86), 'v3')
+        self.assertEqual(self.level(self.ORYON), 'oryon')
+        self.assertEqual(self.level(self.APPLE), 'a64')
+        self.assertEqual(self.level(self.A76), 'a64')
+
+    def test_host_check_without_levels(self):
+        self.assertEqual(self.level({'x86_64_v2': True, 'x86_64_v3': False}), 'v2')
+        self.assertEqual(self.error({'x86_64_v2': False, 'x86_64_v3': False}), 'check.cpu_too_old')
+
+    def test_too_old(self):
+        self.assertEqual(self.error({'arch': 'aarch64', 'levels': [], 'preferred': None}), 'check.cpu_too_old_arm')
+        self.assertEqual(self.error({'arch': 'x86_64', 'levels': [], 'preferred': None}), 'check.cpu_too_old')
+
+    def test_asked_level(self):
+        self.assertEqual(self.level(self.APPLE, env='oryon'), 'oryon')
+        self.assertEqual(self.level(self.ORYON, env='a64'), 'a64')
+        self.assertEqual(self.level(self.ORYON, cpu='a64', env='oryon'), 'a64')   # --cpu wins over TOTK_CPU
+        self.assertEqual(self.level(self.X86, cpu='v2'), 'v2')
+
+    def test_asked_level_this_cpu_cannot_run(self):
+        self.assertEqual(self.error(self.A76, env='oryon'), 'check.cpu_level_unsupported')
+        self.assertEqual(self.error(self.ORYON, env='v3'), 'check.cpu_level_unknown')
+        self.assertEqual(self.error(self.X86, cpu='a64'), 'check.cpu_level_unknown')
+
+    def test_runtime_library_per_level(self):
+        layout = Layout(root=ROOT, dev=False, release='9.9', python=Path('python'), tools=ROOT / 'tools',
+                        recomp=ROOT / 'recomp', llvm=Path('llvm'), deps=None, runtime=Path('rt'),
+                        runtime_lib=Path('rt/libtotkrt.a'), ninja=Path('ninja'), hactool=Path('hactool'),
+                        xlate=Path('xlate'))
+        other = {'v3': 'v2', 'a64': 'oryon'}[steps.DEFAULT_CPU]
+        self.assertEqual(layout.runtime_lib_for(steps.DEFAULT_CPU), Path('rt/libtotkrt.a'))
+        self.assertEqual(layout.runtime_lib_for(other), Path(f'rt/libtotkrt-{other}.a'))
+
+
 if __name__ == '__main__':
     unittest.main()

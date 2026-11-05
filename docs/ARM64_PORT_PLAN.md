@@ -483,34 +483,95 @@ Measure first: `TOTK_CORE_DIAG`, the F10 overlay, and perf or simpleperf on the 
 - **Spin waits.** Compare `yield`, `isb` and `wfe` in `rt_spin_gate` and `plat_pause`.
 - **Asynchronous preemption.** Finish the stub from Phase 2, step 8, if it is not done yet.
 
-## Phase 5: aarch64 setup AppImage (days, after Phase 3)
+## Phase 5: aarch64 setup AppImage (days)
 
-- **`installer/hostcheck.c`:** an aarch64 branch checks:
-  - the HWCAP levels (`a64`, `oryon`);
-  - the page size;
-  - a VA reservation test;
-  - `uname` 6.10 or newer;
-  - the userfaultfd write-protect feature.
+`TotK-Setup-aarch64.AppImage` is the x86-64 Linux release (`tools/make_release_linux.py`, `TotK-Setup-x86_64.AppImage`,
+which the upstream merge of 2026-11-05 brought in) built for aarch64. The player starts it on the handheld and picks
+the base game, the update and the keys. It builds the game into a folder they choose (`totk` with `libSDL3.so.0`
+beside it) and prepares the shaders: no Docker, no root, no Mac. Like the x86-64 release it holds a toolchain and the
+setup, never game code, so it can be shared.
 
-  Its new messages need ids in `installer/text/{en,ru,pt-BR,zh-Hans}.json`.
-- **`installer/steps.py` and `installer/layout.py`:** `ctx.cpu` comes from hostcheck, and the runtime libraries are
-  `libtotkrt-a64.a` and `libtotkrt-oryon.a`.
-- **`tools/make_release_linux.py --arch aarch64`:**
-  - the LLVM `Linux-ARM64` release (bbport's AOT tool already uses the 23.1.3 one);
-  - python-build-standalone `aarch64-unknown-linux-gnu`;
-  - the Ubuntu 22.04 arm64 sysroot from Phase 1 in place of sniper;
-  - `appimagetool-aarch64` and `runtime-aarch64`;
-  - Tk rebuilt against the sysroot, as on x86;
-  - `check_glibc` with a 2.35 floor.
-- **`build_docker.sh release`:** runs it and writes `dist/TotK-Setup-aarch64.AppImage`.
-- **Decision: how the GPU driver ships.** Decide from how Phase 3 went on stock Mesa.
-  - **(a) As on x86:** the game uses the device's Mesa. The package stays small, but a device with an old or
-    unpatched Turnip cannot play.
-  - **(b) As bbport:** the AppImage carries a patched Turnip (and its closure) and starts the game with it. It works
-    on more devices, but the installed game then depends on the AppImage.
-- **On-device compile time.** Today the compile takes about 3 minutes on 24 x86 cores; expect 10-20 minutes on eight
-  phone cores, with JOBS sized by free RAM. The installer already resumes after a failure and recompiles only the
-  chunks that changed.
+**State (2026-11-05): implemented as below, not yet built.** `./build_docker.sh setup` is the next step on the Mac,
+then a full setup run on the handheld. Checked so far: the host check on aarch64 hardware (an Apple silicon VM: levels
+oryon and a64, a64 preferred, as it has no Oryon cores), the installer's tests with the new level choice
+(`tests/installer_test.py` `CpuLevelTest`) and its window test, the Nix expressions by evaluation, and the aarch64
+runtime library compiled against `write_runtime_only`'s `layout.h` (no game files).
+
+- **`tools/make_release_linux.py --arch aarch64`.** x86_64 stays the default and keeps its current output.
+  - **Pins per architecture.** All of these were published on 2026-11-05:
+    - LLVM 23.1.4 `Linux-ARM64`;
+    - python-build-standalone 3.14.10 `aarch64-unknown-linux-gnu` (20261026);
+    - `appimagetool-aarch64` 1.9.1;
+    - `ninja-linux-aarch64` 1.13.2.
+
+    The type-2 `runtime-aarch64` is already pinned in `tools/nix/default.nix`.
+  - **Sysroot.** The Ubuntu 22.04 arm64 one from Phase 1, in place of sniper (x86-64 only). SDL3, static Opus,
+    libvpx and zstd, the Vulkan headers and VMA come from the Nix `deps` output that `build_docker.sh` already builds,
+    so `build_deps` is skipped.
+  - **Paths.** The target's triple replaces the hard-coded `x86_64-linux-gnu` in `used_sysroot_files`,
+    `build_tk_xft` and the SDL3 copy. The dynamic loader is in `/lib`, not `/lib64`.
+  - **Runtime libraries.** `libtotkrt.a` (a64, the default level) and `libtotkrt-oryon.a`
+    (`build_game.py --make-runtime-lib --cpu`), named as x86-64's `libtotkrt.a` (v3) and `libtotkrt-v2.a`.
+  - **Checks.** `check_glibc` gets a 2.35 floor, the sysroot's.
+  - **Licences per architecture.** Ubuntu 22.04's libvpx7, zstd and the GCC that libstdc++ comes from; SDL3's and
+    the Vulkan headers' own licence files, which the Nix `deps` output now carries in `share/licenses`.
+- **Sysroot packages.** `libxft-dev`, `libfontconfig-dev` and `libfreetype-dev` join the roots of
+  `tools/nix/sysroot_lock.py`. They are for Tk rebuilt with Xft, so Russian text uses system fonts, as on x86-64.
+  `build_docker.sh` writes the lock anew whenever its roots differ from the script's (`sysroot_lock.py --check`); the
+  new lock then needs a commit.
+- **`installer/hostcheck.c`.** It includes `<cpuid.h>` unconditionally, so it does not compile on aarch64.
+  - An aarch64 branch reports the code levels the CPU runs from the HWCAP bits `runtime/main.c` `check_cpu` tests:
+    `a64` (LSE atomics, RCpc, dot product) and `oryon` (the Armv8.6 features on top). It prefers oryon only when
+    `/proc/cpuinfo` names Qualcomm's Oryon cores (implementer 0x51, part 0x001 or 0x002).
+  - It also reports the page size (the check stops on anything but 4 KiB) and whether userfaultfd's asynchronous
+    write protection works. A test reservation of the guest's address window was left out: its addresses belong to
+    `recomp/layout.py`, and the game reports a taken window itself.
+  - New message ids in `installer/text/{en,ru,pt-BR,zh-Hans}.json`: `check.cpu_too_old_arm`, `check.cpu_level_unknown`,
+    `check.cpu_level_unsupported`, `check.page_size`.
+- **`installer/steps.py` and `installer/layout.py`.** `Check.cpu_level` takes the host check's preferred level, else
+  "CPU too old". `Layout.runtime_lib_for` finds a level's library by name, in place of `runtime_lib_v2`. The glibc
+  floor is 2.35 on aarch64.
+- **CPU override.** `TOTK_CPU=oryon` (or `a64`) when starting the AppImage, or `--cpu` in the command-line setup, as
+  `build_docker.sh` takes it. A level the CPU cannot run stops the check with a message, rather than building a game
+  that dies of an illegal instruction.
+- **Write tracking.** The kernel version warning (`warn.kernel_old`, below 6.7, now gone from the catalogs) became the
+  host check's test of userfaultfd's asynchronous write protection, noted in the setup's log only. Without the feature
+  the game tracks writes per 2 MiB region (`runtime/memory.c`), as on the handheld's 7.2.6 kernel built without
+  `CONFIG_USERFAULTFD`.
+- **`./build_docker.sh setup`.**
+  - It takes no game files. The runtime libraries are compiled against a `layout.h` with only the module set
+    (`recomp/layout.py` `write_runtime_only`), the part of the generated layout the runtime reads; only the check
+    below needs a lifted version, which an earlier `game` run leaves in the build volumes, and is skipped without one.
+  - It runs `make_release_linux.py --arch aarch64 --sysroot ... --deps ... --no-gpu --appimage` under Xvfb (with
+    DejaVu fonts and the X libraries for nix-ld, from `shell.nix`) and writes `TotK-Setup-aarch64.AppImage` to
+    `TOTK_OUT`. The container has no GPU, so the setup's own check-only pass stops at its Vulkan check (`--no-gpu`).
+  - Then, after a game run, it runs `--prove` for the default level (a64), which builds and links the game with the
+    bundle's own tools only, and runs the self-test and the kernel probe through the sysroot's loader (`--run-with`).
+    The oryon library is built but not linked into a game there; the GPU probes run on the handheld.
+- **GPU driver.** The game uses the device's Mesa, as on x86-64 and in the game AppImage. Stock Turnip (Mesa 26.2.4)
+  runs the game on the handheld.
+- **On the handheld.**
+  - The AppImage mounts with FUSE, else it runs with `--appimage-extract-and-run`.
+  - The Tk window needs X11 (XWayland under a Wayland session).
+  - It is used by touch until gamepad navigation (below) lands. `--cli` as the AppImage's first argument starts the
+    command-line setup (`python -m installer`) instead.
+- **Resources.**
+  - The compile takes about 3 minutes on 24 x86 cores; expect 10-20 minutes on eight phone cores, with JOBS sized by
+    free RAM.
+  - The setup checks free space before it starts; the extraction is the peak (about 55 GB in the Docker build).
+  - The installer resumes after a failure and recompiles only the chunks that changed.
+- **Risks to check first.**
+  - Python 3.14 aarch64 wheels for every pin in `tools/requirements-installer.txt`: the bundle installs binaries
+    only.
+  - XWayland in the handheld's session.
+  - The window's size and Tk's scaling on the handheld's screen.
+- **Decisions.**
+  - Both code levels ship, so the setup also serves Snapdragon 8 Gen 2 and 8 Gen 3 handhelds.
+  - Touch first; gamepad navigation next.
+  - Written to go upstream (tests, four languages), since it holds no game code.
+
+**Exit.** On the handheld, the AppImage builds the game from the NSPs and the keys, prepares the shaders, and the game
+plays.
 
 ### The game AppImage (done)
 
@@ -520,6 +581,19 @@ the portable folder without its RomFS, which goes beside it in `romfs-<version>/
 `~/.local/share/totk-recomp/<version>` and shares one profile between versions. The front is AppImage's static
 type-2 runtime (pinned in `tools/nix/default.nix`), and the game uses the device's Mesa. Code mods are unavailable in
 it: they need a rebuild, which a read-only image cannot do. `docs/building.md` has the details.
+
+### Three outputs, three modes (done)
+
+`build_docker.sh` makes three separate things for a handheld, one mode each (`docs/building.md`, "ARM64 Linux and
+the Docker build"):
+
+- **`appimage`**, the game's code: the game AppImage without the RomFS. It needs the game files only while the Docker
+  build volume holds no extraction; later runs reuse it (`TOTK_VERSION` picks one of several).
+- **`romfs`**, the game's data: extraction (and its hash checks), then `romfs-<version>/romfs.bin` in `TOTK_OUT`. It
+  always needs the game files. The 16 GB copy moved here from `appimage`, so a code rebuild copies 0.5 GB.
+- **`setup`**, the setup AppImage: no game files, ever (done).
+
+`game` keeps making the portable folder, RomFS included.
 
 ### Gamepad navigation in the setup window
 
@@ -600,7 +674,7 @@ a rebuild. Today both windows take only mouse and keyboard, and Tkinter cannot r
 |---|---|---|
 | Turnip on the Adreno 830 hangs or loses the device on TotK's shaders | high | bbport's Mesa patches; Adreno 740 / 750 devices, where Turnip is more mature; Mesa reports with `TOTK_DUMP` / `TOTK_FLIGHT` captures |
 | Host-side races that x86's TSO ordering hid | medium | the Phase 2 audit; soak runs on the device |
-| A kernel without arm64 userfaultfd write protection (before 6.10), or with 39-bit VA | medium, per device | Phase 0 checks; an mprotect write-fault fallback; clear stop messages |
+| A kernel without arm64 userfaultfd write protection (before 6.10, or built without it), or with 39-bit VA | medium, per device | Phase 0 checks; write tracking per 2 MiB region (`runtime/memory.c`, done); clear stop messages |
 | Shadow copies cost too much LPDDR bandwidth | medium | Phase 4 zero-copy |
 | FP differences in the C lowering on a new host | low | the full-encoding-space Unicorn test runs on aarch64 |
 | Docker Desktop disk or RAM limits on the Mac | low | the work volume; JOBS from RAM; warnings |

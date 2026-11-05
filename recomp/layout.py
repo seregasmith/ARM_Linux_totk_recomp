@@ -55,6 +55,25 @@ def write(mods, outdir):
     (outdir / 'layout.h').write_text('\n'.join(lines))
 
 
+def write_runtime_only(names, outdir):
+    """layout.h and layout.json for compiling the runtime library without a game's ExeFS (tools/make_release_linux.py
+    builds the setup's prebuilt runtime libraries this way). The runtime reads only MOD_COUNT and MOD_MAIN_BASE, and
+    both follow from which modules there are (names, in any order; ORDER decides) and FIRST_BASE, not from the module
+    sizes. layout.h leaves every other base and size out, so a runtime file that starts to read one fails to compile
+    here instead of baking in a wrong address; layout.json gives them as 0, and nothing may link a game against it."""
+    mods = [n for n in ORDER if n in names]
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / 'layout.json').write_text(json.dumps(
+        [{'name': n, 'base': '0x0', 'size': '0x0'} for n in mods], indent=1) + '\n')
+    lines = ['// Module layout for the runtime library alone (recomp/layout.py write_runtime_only): the module set,',
+             '// no sizes. Generated; do not edit.', '#pragma once', '',
+             f'#define MOD_MAIN_BASE {FIRST_BASE:#x}ull', f'#define MOD_COUNT {len(mods)}',
+             '#define MOD_LIST(X) ' + ' '.join(f'X({n}, {n.upper()})' for n in mods), '']
+    (outdir / 'layout.h').write_text('\n'.join(lines))
+    return mods
+
+
 def read(outdir):
     """[(name, base, size)] from a layout.json written by write()."""
     data = json.loads((Path(outdir) / 'layout.json').read_text())
