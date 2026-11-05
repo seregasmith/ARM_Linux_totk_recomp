@@ -1715,7 +1715,9 @@ int kern_svc(Cpu *c, uint32_t imm) {
         if (type != 0) {
             int32_t nv = val + 1;
             if (type == 2) {
-                if (cnt <= 0) nv = nw > 0 ? val - 1 : val + 1;
+                // Waking all (count <= 0) with waiters subtracts 2, not 1 (mesosphere
+                // KAddressArbiter::SignalAndModifyByWaitingCountIfEqual; yuzu, LAS Recomp and nxnative agree).
+                if (cnt <= 0) nv = nw > 0 ? val - 2 : val + 1;
                 else nv = nw == 0 ? val + 1 : nw <= cnt ? val - 1 : val;
             }
             uint32_t e = (uint32_t)val;
@@ -1779,8 +1781,13 @@ int kern_svc(Cpu *c, uint32_t imm) {
         int idx = -1;
         lock();
         g_sync_calls++;
+        // Horizon's order (mesosphere KSynchronizationObject::Wait): a signalled object, then timeout 0, then a pending
+        // CancelSynchronization. The cancel is for the next wait that would block: a poll or a wait on a signalled
+        // object leaves it pending. A cancel that wakes this wait (CancelSynchronization wakes it with R_CANCELLED; a
+        // signal wakes it with -1 to look again) ends it cancelled, signalled objects or not.
+        uint32_t woke = 0;
         for (;;) {
-            if (t->cancel) {
+            if (woke == R_CANCELLED) {
                 t->cancel = 0;
                 r = R_CANCELLED;
                 break;
@@ -1796,6 +1803,15 @@ int kern_svc(Cpu *c, uint32_t imm) {
                 r = R_OK;
                 break;
             }
+            if (ns == 0) {
+                r = R_TIMEOUT;
+                break;
+            }
+            if (t->cancel) {
+                t->cancel = 0;
+                r = R_CANCELLED;
+                break;
+            }
             int64_t left = ns;
             if (ns > 0) {
                 uint64_t spent = kern_now_ns() - start;
@@ -1807,7 +1823,8 @@ int kern_svc(Cpu *c, uint32_t imm) {
             }
             t->wobj = n ? hs[0] | (uint64_t)n << 32 : 0;
             g_sync_blocks++;
-            if (block(t, W_SYNC, left) == R_TIMEOUT) {
+            woke = block(t, W_SYNC, left);
+            if (woke == R_TIMEOUT) {
                 r = R_TIMEOUT;
                 break;
             }
@@ -1822,7 +1839,7 @@ int kern_svc(Cpu *c, uint32_t imm) {
         RtThread *t = h_get((uint32_t)x[0], O_THREAD);
         if (t) {
             t->cancel = 1;
-            if (t->wkind == W_SYNC) wake(t, (uint32_t)-1);
+            if (t->wkind == W_SYNC) wake(t, R_CANCELLED);
         }
         unlock();
         x[0] = t ? R_OK : R_BAD_HANDLE;
@@ -1883,9 +1900,18 @@ void kern_event_signal(uint32_t hw) {
 
 // System events of host services: the SDK's own nn::os::CreateSystemEvent creates the kernel event (SVC 0x45) on a
 // guest thread; the writable handle is kept, so any thread (host audio tick included) can signal it later.
+// The guest may destroy such an event and attach the same SystemEventType again: the game does that with the nfp
+// activate and deactivate events before each detection. nn::os::DestroySystemEvent zeroes the state byte at +0x28
+// (0 not initialised, 1 event, 2 inter-process event; nn::os::TryWaitSystemEvent aborts on 0) and closes both
+// handles, so a kept handle counts only while that byte is nonzero.
+#define SE_STATE 0x28
 static struct { uint64_t ev; uint32_t wh; } g_se[512];
 static int g_nse;
 static PlatMutex g_se_lock = PLAT_MUTEX_INIT;
+
+static int se_live(uint64_t ev) {
+    return __atomic_load_n((const uint8_t *)(uintptr_t)(ev + SE_STATE), __ATOMIC_RELAXED) != 0;
+}
 
 static uint32_t se_find(uint64_t ev) {
     plat_mutex_lock_shared(&g_se_lock);
@@ -1896,8 +1922,9 @@ static uint32_t se_find(uint64_t ev) {
     return wh;
 }
 
+// A bound event the guest destroyed since is created again and its table entry takes the new writable handle.
 void kern_bind_system_event(Cpu *c, uint64_t ev, int autoclear) {
-    if (se_find(ev)) return;
+    if (se_find(ev) && se_live(ev)) return;
     if (!tcur || !c) rt_fatal("kern_bind_system_event(%#llx) on a host thread", (unsigned long long)ev);
     static uint64_t create, getw;
     if (!create) {
@@ -1909,15 +1936,21 @@ void kern_bind_system_event(Cpu *c, uint64_t ev, int autoclear) {
     if (r) rt_fatal("kern_bind_system_event: CreateSystemEvent(%#llx) failed %#x", (unsigned long long)ev, r);
     uint32_t wh = (uint32_t)rt_call(c, getw, 1, ev);
     plat_mutex_lock(&g_se_lock);
-    if (g_nse == (int)(sizeof g_se / sizeof *g_se)) rt_fatal("kern_bind_system_event: table full");
-    g_se[g_nse].ev = ev;
-    g_se[g_nse++].wh = wh;
+    int i = 0;
+    while (i < g_nse && g_se[i].ev != ev) i++;
+    if (i == g_nse) {
+        if (g_nse == (int)(sizeof g_se / sizeof *g_se)) rt_fatal("kern_bind_system_event: table full");
+        g_se[g_nse++].ev = ev;
+    }
+    g_se[i].wh = wh;
     plat_mutex_unlock(&g_se_lock);
 }
 
-// An event not bound yet is bound on the spot with manual clear, which needs a guest thread.
+// An event not bound yet is bound on the spot with manual clear, which needs a guest thread. A bound event the guest
+// destroyed is not signalled: its handles are closed and the kernel hands their numbers to new objects.
 void kern_signal_system_event(uint64_t ev) {
     uint32_t wh = se_find(ev);
+    if (wh && !se_live(ev)) return;
     if (!wh) {
         kern_bind_system_event(kern_cpu(), ev, 0);
         wh = se_find(ev);
