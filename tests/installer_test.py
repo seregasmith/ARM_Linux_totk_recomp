@@ -16,7 +16,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from installer import ini, runner, state, steps  # noqa: E402
+from installer import cli, games, ini, runner, state, steps  # noqa: E402
 from installer.events import Reporter  # noqa: E402
 from installer.layout import Layout  # noqa: E402
 
@@ -704,6 +704,146 @@ class CpuLevelTest(unittest.TestCase):
         other = {'v3': 'v2', 'a64': 'oryon'}[steps.DEFAULT_CPU]
         self.assertEqual(layout.runtime_lib_for(steps.DEFAULT_CPU), Path('rt/libtotkrt.a'))
         self.assertEqual(layout.runtime_lib_for(other), Path(f'rt/libtotkrt-{other}.a'))
+
+
+class GamesFolderTest(unittest.TestCase):
+    """The Linux setup's games folder (installer/games.py): one install per update, shared saves, Steam."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.games = Path(self.tmp.name) / 'totk-recomp'
+
+    def install(self, version, exe=True):
+        folder = games.folder_for(self.games, version)
+        folder.mkdir(parents=True)
+        state.save(folder, state.empty('r0') | {'version': version})
+        if exe:
+            (folder / ('totk.exe' if steps.os.name == 'nt' else 'totk')).write_bytes(b'exe')
+        return folder
+
+    def test_default_folder(self):
+        with mock.patch.dict(steps.os.environ, {'XDG_DATA_HOME': '/data'}):
+            self.assertEqual(games.default_folder(), Path('/data/totk-recomp'))
+        with mock.patch.dict(steps.os.environ, {'XDG_DATA_HOME': ''}):
+            self.assertEqual(games.default_folder(), Path.home() / '.local' / 'share' / 'totk-recomp')
+
+    def test_highest_finished_install(self):
+        self.assertIsNone(games.highest(self.games))
+        v121 = self.install('1.2.1')
+        self.install('1.4.3', exe=False)   # not finished: no game yet
+        (self.games / 'v110').mkdir()      # a folder without a state file
+        self.assertEqual(games.highest(self.games), ('1.2.1', v121))
+        v143 = games.folder_for(self.games, '1.4.3')
+        (v143 / ('totk.exe' if steps.os.name == 'nt' else 'totk')).write_bytes(b'exe')
+        self.assertEqual([v for v, _ in games.installs(self.games)], ['1.4.3', '1.2.1'])
+        self.assertEqual(games.highest(self.games), ('1.4.3', v143))
+
+    def test_saves_move_to_the_shared_folder(self):
+        dest = self.install('1.2.1')
+        (dest / 'profile').mkdir()
+        (dest / 'profile' / 'save.bin').write_bytes(b's')
+        self.assertIsNone(games.share_profile(dest, self.games))
+        self.assertFalse((dest / 'profile').exists())
+        self.assertEqual((self.games / 'profile' / 'save.bin').read_bytes(), b's')
+
+    def test_two_sets_of_saves_stay_apart(self):
+        dest = self.install('1.4.3')
+        for folder in (dest / 'profile', self.games / 'profile'):
+            folder.mkdir(parents=True)
+            (folder / 'save.bin').write_bytes(b's')
+        self.assertEqual(games.share_profile(dest, self.games), dest / 'profile')
+        self.assertTrue((dest / 'profile' / 'save.bin').is_file())
+
+    def test_empty_own_profile_gives_way(self):
+        dest = self.install('1.2.1')
+        (dest / 'profile').mkdir()
+        self.assertIsNone(games.share_profile(dest, self.games))
+        self.assertFalse((dest / 'profile').exists())
+        self.assertTrue((self.games / 'profile').is_dir())
+
+    def test_totk_ini_points_at_the_shared_saves(self):
+        text = ini.set_value(ini.set_language('[files]\n# profile_dir =\n', 'en-US'), 'profile_dir', '../profile',
+                             'files')
+        self.assertIn('profile_dir = ../profile', text)
+        self.assertNotIn('# profile_dir', text)
+        self.assertEqual(ini.set_value(text, 'profile_dir', '', 'files').count('profile_dir'), 1)
+        self.assertIn('[files]\nprofile_dir = x', ini.set_value('', 'profile_dir', 'x', 'files'))
+
+    def test_add_to_steam(self):
+        dest = self.install('1.4.3')
+        script = games.steam_link(dest, '1.4.3')
+        self.assertEqual(script.name, 'TotK Recomp 1.4.3')
+        self.assertTrue(script.read_text().startswith('#!/bin/sh'))
+        allow = Path(self.tmp.name) / 'addnonsteamgamefile'
+        with mock.patch.object(games, 'STEAM_ALLOW', allow), mock.patch.object(games, 'steam_running', lambda: True), \
+                mock.patch.object(games.shutil, 'which', lambda name: '/usr/bin/steam' if name == 'steam' else None), \
+                mock.patch.object(games.subprocess, 'Popen') as popen:
+            self.assertEqual(games.add_to_steam(script), (True, '/usr/bin/steam'))
+        self.assertTrue(allow.is_file())
+        cmd = popen.call_args[0][0]
+        self.assertEqual(cmd[0], '/usr/bin/steam')
+        self.assertTrue(cmd[1].startswith('steam://addnonsteamgame/%2F'))
+        self.assertTrue(cmd[1].endswith('TotK%20Recomp%201.4.3'))
+        with mock.patch.object(games, 'STEAM_ALLOW', allow), mock.patch.object(games, 'steam_running', lambda: True), \
+                mock.patch.object(games.shutil, 'which', lambda n: None):
+            self.assertFalse(games.add_to_steam(script)[0])
+        home = Path(self.tmp.name) / 'home'
+        (home / '.steam').mkdir(parents=True)
+        (home / '.steam' / 'steam.pid').write_text('999999999')   # no such process
+        with mock.patch.object(games.Path, 'home', lambda: home):
+            self.assertEqual(games.add_to_steam(script), (False, 'Steam is not running'))
+            (home / '.steam' / 'steam.pid').write_text(str(steps.os.getpid()))
+            self.assertTrue(games.steam_running())
+
+    def test_a_rebuild_by_its_install_folder_keeps_the_shared_saves(self):
+        dest = self.install('1.2.1')
+        ctx = SimpleNamespace(dest=dest, options=SimpleNamespace())
+        self.assertIsNone(steps.games_folder(ctx))
+        (dest / 'totk.ini').write_text('[files]\nprofile_dir = ../profile\n', encoding='utf-8')
+        self.assertEqual(steps.games_folder(ctx), self.games)
+        self.assertEqual(steps.profile_dir(ctx), self.games / 'profile')
+
+    def test_cli_without_game_files_continues_the_highest_version(self):
+        v121 = self.install('1.2.1')
+        args = SimpleNamespace(games=self.games, update=None, keys=None, temp=None)
+        with mock.patch('sys.stdout', new=io.StringIO()):
+            self.assertEqual(cli.games_dest(args, SimpleNamespace(temp=None)), v121)
+
+    def test_cli_with_an_empty_games_folder_asks_for_the_files(self):
+        args = SimpleNamespace(games=self.games, update=None, keys=None, temp=None)
+        with mock.patch('sys.stdout', new=io.StringIO()) as out:
+            self.assertIsNone(cli.games_dest(args, SimpleNamespace(temp=None)))
+        events = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual([e['id'] for e in events if e['type'] == 'error'], ['cli.no_install'])
+
+    def test_cli_names_the_folder_after_the_update(self):
+        args = SimpleNamespace(games=self.games, update=Path('u.nsp'), keys=Path('prod.keys'), temp=None)
+        with mock.patch.object(cli, 'identify_update_file', lambda *a: '1.4.3'), \
+                mock.patch('sys.stdout', new=io.StringIO()):
+            self.assertEqual(cli.games_dest(args, SimpleNamespace(temp=None)), self.games / 'v143')
+
+    def test_update_identified_before_the_install(self):
+        work = Path(self.tmp.name) / 'work'
+        for name in ('u.nsp', 'prod.keys'):
+            (Path(self.tmp.name) / name).write_bytes(b'x')
+
+        def fake_exefs(game, keys, out, logs, update):
+            (out / 'exefs').mkdir(parents=True)
+        rep = Reporter(out=io.StringIO())
+        self.addCleanup(rep.close)
+        with mock.patch.object(steps.ncz, 'compressed', lambda p: None), \
+                mock.patch.object(steps.extract, 'extract_exefs', fake_exefs), \
+                mock.patch.object(steps.extract, 'identify_update', lambda e, v: {'display_version': '1.4.3'}):
+            self.assertEqual(steps.identify_update_file(Path(self.tmp.name) / 'u.nsp',
+                                                        Path(self.tmp.name) / 'prod.keys', work, rep), '1.4.3')
+        with mock.patch.object(steps.ncz, 'compressed', lambda p: None), \
+                mock.patch.object(steps.extract, 'extract_exefs', fake_exefs), \
+                mock.patch.object(steps.extract, 'identify_update', mock.Mock(side_effect=ValueError('no'))):
+            with self.assertRaises(runner.InstallError) as e:
+                steps.identify_update_file(Path(self.tmp.name) / 'u.nsp', Path(self.tmp.name) / 'prod.keys', work,
+                                           rep)
+            self.assertEqual(e.exception.id, 'check.update_wrong_version')
 
 
 if __name__ == '__main__':

@@ -359,6 +359,10 @@
 # Folder with the Switch shared fonts (BFTTF files, tools/extract_fonts.py output), for Chinese and Korean text.
 # Default: shared-fonts next to totk.exe. TOTK_SHARED_FONTS overrides it.
 # shared_fonts =
+# Folder of the saves, absolute or relative to the folder of totk.exe. Default: profile next to totk.exe. The Linux
+# setup's installs in a games folder set ../profile, so every version there shares the saves. TOTK_PROFILE_DIR
+# overrides it.
+# profile_dir =
 
 [cheats]
 # One line per cheat of the mods' cheat files, mods\<mod>\cheats\<build id>.txt (docs/cheats.md); the Cheats tab of

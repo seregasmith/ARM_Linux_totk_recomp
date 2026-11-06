@@ -38,6 +38,9 @@
 #   TOTK_FIRMWARE  optional: a firmware NCA folder, for the shared fonts (Chinese, Korean text)
 # Example:
 #   TOTK_BASE=~/Switch/totk.nsp TOTK_UPDATE=~/Switch/totk-143.nsp TOTK_KEYS=~/Switch/prod.keys ./build_docker.sh
+# For x86-64 PCs and the Steam Deck on Apple Silicon add --arch x86_64 (or TOTK_ARCH=x86_64): the container then runs
+# under Rosetta or QEMU, with its own image, volumes and build/install-x86_64 (docs/building.md, "The other
+# architecture").
 # Then copy the folder to the handheld, run `./totk --prepare-shaders` there once (the GPU half of the shader step),
 # and play `./totk`. With appimage and romfs: copy the AppImage and romfs-<version>/ into one folder on the handheld,
 # run the AppImage with --prepare-shaders once, then start it; a code change needs only appimage again. All of these

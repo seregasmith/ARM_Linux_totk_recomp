@@ -143,6 +143,25 @@ def fill(appdir, game, version):
     return count
 
 
+def pack(appdir, runtime, out, mksquashfs, work):
+    """The AppImage out: the type-2 runtime, then appdir as a squashfs image, which is made in the folder work first.
+    zstd is what the runtime reads; root-owned files and no extended attributes, as appimagetool makes them. out is
+    written under a .part name until it is complete. tools/make_release_linux.py packs the setup the same way: an
+    AppImage cannot start under binfmt emulation (its ELF header carries the AppImage magic in e_ident's padding, which
+    the emulator's binfmt_misc entry does not match), so appimagetool does not run in an emulated container."""
+    image = Path(work) / 'image.squashfs'
+    subprocess.run([mksquashfs, str(appdir), str(image), '-noappend', '-root-owned', '-no-xattrs', '-comp', 'zstd',
+                    '-quiet', '-no-progress'], check=True)
+    part = out.with_name(out.name + '.part')
+    with part.open('wb') as f:
+        f.write(Path(runtime).read_bytes())
+        with image.open('rb') as src:
+            shutil.copyfileobj(src, f, 8 << 20)
+    image.unlink()
+    part.chmod(0o755)
+    os.replace(part, out)
+
+
 def check_runtime(runtime, arch):
     """runtime is an AppImage type-2 runtime ELF for arch."""
     head = runtime.read_bytes()[:20]
@@ -183,17 +202,7 @@ def main():
         appdir = tmp / 'AppDir'
         appdir.mkdir()
         count = fill(appdir, game, a.version)
-        image = tmp / 'image.squashfs'
-        # zstd: what the type-2 runtime reads; root-owned files and no extended attributes, as appimagetool makes them
-        subprocess.run([mksquashfs, str(appdir), str(image), '-noappend', '-root-owned', '-no-xattrs', '-comp', 'zstd',
-                        '-quiet', '-no-progress'], check=True)
-        part = out.with_name(out.name + '.part')
-        with part.open('wb') as f:
-            f.write(a.runtime.read_bytes())
-            with image.open('rb') as src:
-                shutil.copyfileobj(src, f, 8 << 20)
-        part.chmod(0o755)
-        os.replace(part, out)
+        pack(appdir, a.runtime, out, mksquashfs, tmp)
     print(f'package_appimage: {out}: {count} files, {out.stat().st_size / 2**20:.0f} MiB')
     print(f'package_appimage: put the RomFS beside it as romfs-{a.version}/romfs.bin '
           f'(or into ~/.local/share/{NAME}/{a.version}/); data goes to ~/.local/share/{NAME}/{a.version}')

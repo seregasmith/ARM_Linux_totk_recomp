@@ -52,6 +52,32 @@ def set_language(text, lang):
     return '\n'.join(lines) + '\n'
 
 
+def set_value(text, key, value, section):
+    """text with `key = value`, the same way as set_language: an active line is rewritten in place, else the commented
+    example line is activated, else the line goes under [section] (created at the end if missing)."""
+    active = re.compile(rf'^(\s*)(?:totk_)?{re.escape(key)}(\s*=\s*)(.*?)(\s*)$', re.IGNORECASE)
+    commented = re.compile(rf'^\s*[#;]\s*(?:totk_)?{re.escape(key)}\s*=.*$', re.IGNORECASE)
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = active.match(line)
+        if m:
+            lines[i] = f'{m.group(1)}{key}{m.group(2)}{value}'
+            return '\n'.join(lines) + '\n'
+    for i, line in enumerate(lines):
+        if commented.match(line):
+            lines[i] = f'{key} = {value}'
+            return '\n'.join(lines) + '\n'
+    for i, line in enumerate(lines):
+        m = SECTION.match(line)
+        if m and m.group(1).strip().lower() == section:
+            lines.insert(i + 1, f'{key} = {value}')
+            return '\n'.join(lines) + '\n'
+    if lines and lines[-1].strip():
+        lines.append('')
+    lines += [f'[{section}]', f'{key} = {value}']
+    return '\n'.join(lines) + '\n'
+
+
 def get_language(text):
     for line in text.splitlines():
         m = ACTIVE.match(line)
@@ -60,8 +86,9 @@ def get_language(text):
     return None
 
 
-def write(dest, lang, example=None):
-    """Write dest/totk.ini with lang; an existing file keeps its other lines. Returns the path."""
+def write(dest, lang, example=None, values=()):
+    """Write dest/totk.ini with lang and values ((key, value, section) set with set_value); an existing file keeps its
+    other lines. Returns the path."""
     path = Path(dest) / 'totk.ini'
     if path.is_file():
         text = path.read_text(encoding='utf-8-sig')
@@ -70,6 +97,8 @@ def write(dest, lang, example=None):
     else:
         text = ''
     new = set_language(text, lang)
+    for key, value, section in values:
+        new = set_value(new, key, value, section)
     if path.is_file() and new == text:
         return path
     tmp = path.with_name('totk.ini.tmp')

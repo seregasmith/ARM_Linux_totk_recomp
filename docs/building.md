@@ -275,6 +275,48 @@ other way to the same game: it carries the toolchain instead of the code and bui
 (`tools/package_build.py`, `build/install-<arch>/totk-<version>`, with the RomFS inside unless `TOTK_ROMFS=0`); copy
 it to the handheld and run `./totk --prepare-shaders` there once.
 
+### The other architecture: x86-64 on an ARM machine
+
+`--arch` picks the target (or `TOTK_ARCH`; `--arch` wins when both are set). Without either, the target is Docker's own
+architecture: aarch64 on Apple Silicon, x86_64 on an Intel Mac or an x86-64 PC. For the other one the whole container
+runs emulated: on Apple Silicon, `--arch x86_64` builds the game for x86-64 Linux PCs and the Steam Deck under Rosetta
+or QEMU. It is the same build, only slower, several times so for the compile.
+
+```sh
+./build_docker.sh --arch x86_64 test                    # the toolchain and the checks, as a first try
+TOTK_BASE=~/Switch/totk.nsp TOTK_UPDATE=~/Switch/totk-143.nsp TOTK_KEYS=~/Switch/prod.keys \
+    ./build_docker.sh --arch x86_64 game                # the portable folder, build/install-x86_64/totk-<version>
+TOTK_ARCH=x86_64 TOTK_CPU=v2 ./build_docker.sh appimage # the same with TOTK_ARCH, for CPUs without AVX2
+```
+
+- **Docker has to run the other platform's containers.** The script checks that first (a `linux/amd64` container
+  that prints `uname -m`) and, when it can't, stops and prints how to turn emulation on:
+  - Docker Desktop: Settings > General > "Use Rosetta for x86_64/amd64 emulation on Apple Silicon";
+  - OrbStack: built in;
+  - colima: `colima start --vm-type vz --vz-rosetta`;
+  - Linux on arm64: `docker run --privileged --rm tonistiigi/binfmt --install amd64` (lasts until the next reboot).
+- **Each target has its own Docker image, volumes, logs and output.** The image is `totk-builder:<nixpkgs>-x86_64`, the
+  Nix store `totk-nix-x86_64` (`TOTK_NIX_VOLUME=bbport-nix-x86_64` reuses the Bloodborne port's), the work volumes
+  `totk-x86_64-*`, the logs `build/docker-logs-x86_64` and the output `build/install-x86_64`. Nothing is shared with
+  the aarch64 build: the x86_64 build extracts the game files again (about 55 GB free at the peak, once more).
+- **The sysroot lock.** The first x86_64 run writes `tools/nix/sysroot-amd64.lock.json` (Ubuntu 22.04 amd64 from
+  `archive.ubuntu.com`); commit it with the arm64 one.
+- **Code levels.** `TOTK_CPU=v3` (the default: AVX2, FMA, BMI2) or `v2` (SSE4.2, for older CPUs, slower). The build
+  runs the game's self-test in the container, which checks that the CPU has the level's instructions, so the emulator
+  must provide them: a v3 build stops there under an emulator without AVX2 or FMA, and `TOTK_CPU=v2` builds one that
+  passes.
+- **The outputs** are those of aarch64: `game` the portable folder (Steam Deck: from Desktop Mode, or as a non-Steam
+  game), `appimage` and `romfs` the game AppImage and its RomFS, `setup` `TotK-Setup-x86_64.AppImage`. The x86-64
+  setup is built against Valve's Steam Runtime 3 "sniper" SDK, which `tools/make_release_linux.py` downloads itself, as
+  upstream's Linux release is; the Nix sysroot is aarch64's.
+- **On an x86-64 machine** the Docker build runs natively, and the Windows and Linux builds above ("Build", "Linux
+  (in progress)") need no Docker at all.
+- **Not tried yet with this tree:** an x86_64 build under Rosetta on Apple Silicon. NativeAOT (the shader translator)
+  and the extraction's hactool run emulated there and are the likeliest to need work; the logs in
+  `build/docker-logs-x86_64` say which step stopped.
+
+The same works the other way: on an x86-64 host, `--arch aarch64` builds for the handheld under QEMU.
+
 ### The game AppImage
 
 `./build_docker.sh appimage` extracts and lifts the game, compiles and links it and packs it as

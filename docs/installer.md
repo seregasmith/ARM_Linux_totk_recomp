@@ -233,12 +233,42 @@ built on an aarch64 machine, since NativeAOT builds the translator for the machi
   `libtotkrt-oryon.a` the `-mcpu=oryon-1` one. The host check (`installer/hostcheck.c`) lists the levels the CPU runs
   from the same HWCAP bits the game checks at start, and prefers oryon only on Qualcomm's Oryon cores (the Snapdragon
   8 Elite). It also stops on a kernel whose pages are not 4 KiB.
-- **Choosing a level.** `TOTK_CPU=a64` or `oryon` when starting the AppImage (the window passes it to the CLI), or
-  `--cpu` in the command-line setup, builds that level instead; the check stops on a level this CPU cannot run. The
-  x86-64 setup takes `v3` or `v2` the same way.
+- **Choosing a level.** The window's code level box (Automatic, then the architecture's levels), `--cpu` in the
+  command-line setup, or `TOTK_CPU=a64` or `oryon` when starting the AppImage (the box starts at it) builds that level
+  instead; the check stops on a level this CPU cannot run. The x86-64 setup takes `v3` or `v2` the same way.
 - **The device.** The window is Tk on X11 (XWayland under a Wayland session) and is used by touch; the command-line
-  setup is `./TotK-Setup-aarch64.AppImage --cli --base ... --update ... --keys ... --lang ... --dest ...`. Without
+  setup is `./TotK-Setup-aarch64.AppImage --cli --base ... --update ... --keys ... --lang ... --games ...`. Without
   `/dev/fuse` the AppImage starts with `--appimage-extract-and-run`.
+
+### Games folder and Steam (Linux)
+
+Off Windows the window asks for a games folder instead of an install folder (`installer/games.py`; `--games` in the
+CLI, which takes it in place of `--dest`). The default is `~/.local/share/totk-recomp` (`$XDG_DATA_HOME/totk-recomp`):
+
+```
+~/.local/share/totk-recomp/
+  v121/, v143/        one install folder per update, as on Windows (totk, exefs/, romfs/, totk.ini, ...)
+  profile/            the saves of every version: each install's totk.ini sets profile_dir = ../profile
+```
+
+- **Which folder.** With game files, the setup first identifies the update by the hash of its code, as the check
+  does (`steps.py` `identify_update_file`; an NSZ is unpacked once, where the check finds it again), and installs into
+  `<games>/<version tag>`. Without game files it continues or rebuilds the highest version installed there. The window
+  names the installed versions under the form.
+- **Saves.** At the end of an install the cleanup step moves the install's own `profile/` into the shared one when only
+  it holds saves, and sets `profile_dir = ../profile` in `totk.ini` (`runtime/main.c` `portable_paths` reads it,
+  relative to the folder of `totk`). When both hold saves it keeps the install's own and warns
+  (`warn.profile_kept`). A rebuild started by the game (`--rebuild`, `--dest`) sees the setting and keeps it.
+- **The game AppImage's data.** That AppImage keeps its settings, logs and caches in the same `<games>/<version tag>`
+  folders and its saves in `<games>/profile`, so an install there takes them over: the check accepts a folder that
+  holds only what the game writes (`games.py` `DATA_NAMES`).
+- **Add to Steam.** The window's "Add to Steam" button, on the form once a version is installed and on the finish
+  screen, asks the running Steam client to add the highest installed version as a non-Steam game, the way SteamOS's
+  own "Add to Steam" does: it creates `/tmp/addnonsteamgamefile` and opens `steam://addnonsteamgame/<path>` with the
+  `steam` command (`xdg-open` without one). Steam names the entry after the file, so the setup adds a two-line script
+  `TotK Recomp <version>` beside `totk` that starts it. Steam must be running; a Steam pid file that names no live
+  process stops it with a message. Whether Steam took the request is not reported back. `--add-to-steam` does the same
+  from the command line.
 
 ## Constraints
 

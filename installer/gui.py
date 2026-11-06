@@ -2,7 +2,10 @@
 
 A front end over the CLI (docs/installer.md): it collects the game files, the keys file path, the optional firmware
 folder, the game language and the install folder, runs `python -m installer ...` as a subprocess and shows its JSON
-events. Decisions live in guilogic.py; this file only draws. The window text is in
+events. Off Windows the folder is a games folder (installer/games.py, --games; default ~/.local/share/totk-recomp):
+each update installs into its own folder there, the window names the installed versions, and "Add to Steam" asks the
+running Steam client to add the highest one. The code level box passes --cpu (default: the one the host check picks,
+or TOTK_CPU). Decisions live in guilogic.py; this file only draws. The window text is in
 installer/text/<en|ru|pt-BR|zh-Hans>.json under "ui.*" and "launcher.*" ids.
 
     --selftest [--shots DIR]   build every screen in every language and close by itself (PNG per screen with --shots)
@@ -24,6 +27,7 @@ try:
 except ImportError:
     ImageGrab = None
 
+from . import games as gamesdir
 from . import ini
 from . import layout as layouts
 from .guilogic import (DONE, FAILED, PENDING, RUNNING, SKIPPED, UI_LANGUAGE_LABELS, UI_LANGUAGES, Catalog, Form, Model,
@@ -57,6 +61,10 @@ class App:
         self.bound = []                  # (widget, option, id, params) retranslated on a language switch
         self.vars = {n: tk.StringVar() for n in ('base', 'update', 'keys', 'firmware', 'dest')}
         self.vars['lang'] = tk.StringVar()
+        self.vars['cpu'] = tk.StringVar()
+        # Off Windows the folder is a games folder (installer/games.py); a rebuild names its install folder itself
+        self.games_mode = os.name != 'nt' and not rebuild
+        self.cpu_levels = layouts.CPU_LEVELS.get(layouts.ARCH, ())
         self.lang_code = default_game_language(ui_lang)
         self.screen = None
         self.fitted = None               # the (width, height) fit last gave the window
@@ -97,7 +105,10 @@ class App:
         self.body.pack(fill='both', expand=True)
         self.frames = {'form': self.build_form(), 'run': self.build_run(), 'finish': self.build_finish()}
         self.vars['lang'].set(self.lang_label(self.lang_code))
+        self.fill_cpu()
         self.vars['dest'].trace_add('write', lambda *_: self.refresh_form())
+        if self.games_mode:
+            self.vars['dest'].set(str(gamesdir.default_folder()))
         self.show('form')
         if rebuild:
             self.bind_text(self.title, 'text', 'ui.rebuild_title')
@@ -125,6 +136,7 @@ class App:
         for widget, option, id, params in self.bound:
             widget.configure(**{option: self.cat(id, **params)})
         self.fill_languages()
+        self.fill_cpu()
         self.refresh_form()
         self.refresh_run()
         self.refresh_finish()
@@ -149,6 +161,18 @@ class App:
         code = self.selected_lang()
         self.lang_box.configure(values=[self.lang_label(c) for c in ini.LANGUAGES])
         self.vars['lang'].set(self.lang_label(code))
+
+    def fill_cpu(self):
+        """The code level box: automatic, then the levels of this architecture (tools/build_game.py CPU_LEVELS). It
+        starts at TOTK_CPU when that names one."""
+        shown = self.selected_cpu() if self.vars['cpu'].get() else os.environ.get('TOTK_CPU', '').strip()
+        self.cpu_box.configure(values=[self.cat('ui.cpu_auto'), *self.cpu_levels])
+        self.vars['cpu'].set(shown if shown in self.cpu_levels else self.cat('ui.cpu_auto'))
+
+    def selected_cpu(self):
+        """The code level for --cpu, '' for automatic."""
+        shown = self.vars['cpu'].get()
+        return shown if shown in self.cpu_levels else ''
 
     def selected_lang(self):
         """The game language code behind the combobox text (kept when it is not one of the labels)."""
@@ -195,6 +219,9 @@ class App:
         bar.pack(side='bottom', fill='x', pady=(12, 0))
         self.start_button = self.button(bar, 'ui.start', self.start)
         self.start_button.pack(side='right')
+        self.steam_button = self.button(bar, 'ui.add_steam', self.add_steam)
+        if self.games_mode:
+            self.steam_button.pack(side='left')
         self.form_intro = self.label(f, 'ui.intro', wraplength=620, justify='left')
         self.form_intro.pack(anchor='w', pady=(0, 8))
         self.notice(f).pack(fill='x', pady=(0, 10))
@@ -222,9 +249,15 @@ class App:
         self.lang_touched = False
         self.lang_box.bind('<<ComboboxSelected>>', lambda _e: setattr(self, 'lang_touched', True))
         self.fill_languages()
-        self.label(grid, 'ui.dest').grid(row=i + 1, column=0, sticky='w', pady=4)
+        i += 1
+        self.label(grid, 'ui.cpu').grid(row=i, column=0, sticky='w', pady=4)
+        self.cpu_box = ttk.Combobox(grid, textvariable=self.vars['cpu'], state='readonly', width=30)
+        self.cpu_box.grid(row=i, column=1, sticky='w', pady=4)
+        self.label(grid, 'ui.games' if self.games_mode else 'ui.dest').grid(row=i + 1, column=0, sticky='w', pady=4)
         ttk.Entry(grid, textvariable=self.vars['dest']).grid(row=i + 1, column=1, sticky='ew', pady=4)
         self.button(grid, 'ui.browse', self.pick_dest).grid(row=i + 1, column=2, padx=(8, 0))
+        if self.games_mode:
+            self.label(f, 'ui.games_help', wraplength=620, justify='left').pack(anchor='w', pady=(8, 0))
         self.label(f, 'ui.compressed_help', wraplength=620, justify='left').pack(anchor='w', pady=(8, 0))
         self.label(f, 'ui.firmware_help', wraplength=620, justify='left').pack(anchor='w', pady=(8, 0))
         # On by default and named with its source and licence: the player sees what is downloaded and can untick it
@@ -235,6 +268,8 @@ class App:
         self.label(f, 'ui.dlss_help', wraplength=620, justify='left').pack(anchor='w', padx=(22, 0))
         self.update_hint = ttk.Label(f, wraplength=620, justify='left')
         self.update_hint.pack(anchor='w', pady=(8, 0))
+        self.steam_label = ttk.Label(f, wraplength=620, justify='left')
+        self.steam_label.pack(anchor='w', pady=(4, 0))
         self.form_error = ttk.Label(f, style='Err.TLabel', wraplength=620, justify='left')
         self.form_error.pack(anchor='w', pady=(8, 0))
         self.label(f, 'ui.keys_private', wraplength=620, justify='left').pack(anchor='w', pady=(8, 0))
@@ -279,6 +314,9 @@ class App:
         self.open_button.pack(side='right', padx=(0, 8))
         self.back_button = self.button(bar, 'ui.back', lambda: self.show('form'))
         self.back_button.pack(side='left')
+        self.finish_steam = self.button(bar, 'ui.add_steam', self.add_steam)
+        if self.games_mode:
+            self.finish_steam.pack(side='right', padx=(0, 8))
         if self.rebuild:   # a failed or cancelled rebuild: the game starts with the code it has
             self.button(bar, 'ui.start_game', self.start_game).pack(side='right', padx=(0, 8))
         self.finish_title = ttk.Label(f, style='Title.TLabel', wraplength=620, justify='left')
@@ -289,6 +327,8 @@ class App:
         self.finish_steps.pack(fill='x', pady=(0, 8))
         self.finish_notice = self.notice(f)
         self.finish_notice.pack(fill='x', pady=(8, 0))
+        self.finish_steam_label = ttk.Label(f, wraplength=620, justify='left')
+        self.finish_steam_label.pack(anchor='w', pady=(8, 0))
         return f
 
     # ---- form -----------------------------------------------------------------------------------------------------
@@ -296,18 +336,43 @@ class App:
     def form(self):
         return Form(base=self.vars['base'].get(), update=self.vars['update'].get(), keys=self.vars['keys'].get(),
                     firmware=self.vars['firmware'].get(), lang=self.selected_lang(), dest=self.vars['dest'].get(),
-                    dlss=self.dlss_var.get())
+                    dlss=self.dlss_var.get(), games=self.games_mode, cpu=self.selected_cpu())
 
     def refresh_form(self):
         form = self.form()
         state = form.installed_state()
-        if state is not None:
+        if state is not None and self.games_mode:
+            found = gamesdir.installs(Path(form.dest.strip()))
+            self.update_hint.configure(text=self.cat('ui.installed', versions=', '.join(v for v, _ in found),
+                                                     version=found[0][0]))
+            recorded = ini.canonical_language(state.get('lang'))
+            if recorded in ini.LANGUAGES and not self.lang_touched:
+                self.vars['lang'].set(self.lang_label(recorded))
+        elif state is not None:
             self.update_hint.configure(text=self.cat('ui.update_mode'))
             recorded = ini.canonical_language(state.get('lang'))
             if recorded in ini.LANGUAGES and not self.lang_touched:
                 self.vars['lang'].set(self.lang_label(recorded))
         else:
             self.update_hint.configure(text='')
+        self.steam_button.state(['!disabled' if state is not None else 'disabled'])
+        self.fit()
+
+    def add_steam(self):
+        """Asks the running Steam client to add the highest version in the games folder (installer/games.py); the
+        result shows under the form and on the finish screen."""
+        found = gamesdir.highest(Path(self.vars['dest'].get().strip()))
+        if found is None:
+            text = self.cat('ui.steam_none')
+        else:
+            try:
+                path = gamesdir.steam_link(found[1], found[0])
+                ok, detail = gamesdir.add_to_steam(path)
+            except OSError as e:
+                ok, detail = False, str(e)
+            text = self.cat('ui.steam_added', name=path.name) if ok else self.cat('ui.steam_failed', detail=detail)
+        for label in (self.steam_label, self.finish_steam_label):
+            label.configure(text=text)
         self.fit()
 
     def pick_file(self, name, pick_id):
@@ -325,7 +390,8 @@ class App:
             self.vars['firmware'].set(os.path.normpath(path))
 
     def pick_dest(self):
-        path = filedialog.askdirectory(title=self.cat('ui.pick_dest'), mustexist=False)
+        path = filedialog.askdirectory(title=self.cat('ui.pick_games' if self.games_mode else 'ui.pick_dest'),
+                                       mustexist=False)
         if path:
             self.vars['dest'].set(os.path.normpath(path))
 
@@ -521,6 +587,8 @@ class App:
             self.open_button.state(['!disabled'])
         else:
             self.open_button.state(['disabled' if not Path(m.dest or '.').is_dir() else '!disabled'])
+        installed = self.games_mode and gamesdir.highest(Path(self.vars['dest'].get().strip() or '.')) is not None
+        self.finish_steam.state(['!disabled' if installed else 'disabled'])
 
     def start_game(self):
         """Starts the game of the install folder and closes the window."""

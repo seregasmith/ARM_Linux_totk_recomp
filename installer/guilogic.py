@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import games as gamesdir
 from . import ini
 from . import state as statefile
 from .events import render
@@ -138,13 +139,25 @@ class Form:
     lang: str = ''
     dest: str = ''
     dlss: bool = False
+    games: bool = False   # dest is a games folder (installer/games.py, --games): the Linux window
+    cpu: str = ''         # a code level for --cpu; '' lets the host check pick
 
-    def installed_state(self):
-        """The recorded state of the install folder (totk-install.json), or None. Never raises."""
+    def installed(self):
+        """(version, folder) of the install this run continues or updates without game files: in a games folder its
+        highest version, else the install folder itself (version None). None when there is none."""
         if not self.dest.strip():
             return None
+        if self.games:
+            return gamesdir.highest(Path(self.dest.strip()))
+        return (None, Path(self.dest.strip()))
+
+    def installed_state(self):
+        """The recorded state of that install (totk-install.json), or None. Never raises."""
+        found = self.installed()
+        if found is None:
+            return None
         try:
-            return statefile.load(Path(self.dest.strip()))
+            return statefile.load(found[1])
         except statefile.StateError:
             return None
 
@@ -157,7 +170,7 @@ class Form:
         found = []
         update = self.update_mode()
         if not self.dest.strip():
-            found.append('ui.need_dest')
+            found.append('ui.need_games' if self.games else 'ui.need_dest')
         if not update:
             for name in ('base', 'update', 'keys'):
                 value = getattr(self, name).strip()
@@ -178,8 +191,10 @@ class Form:
 
     def command(self, python, root=None, temp=None, verify_hashes=False):
         cmd = [str(python), '-m', 'installer']
+        place = '--games' if self.games else '--dest'
         for flag, value in (('--base', self.base), ('--update', self.update), ('--keys', self.keys),
-                            ('--firmware', self.firmware), ('--lang', self.lang), ('--dest', self.dest)):
+                            ('--firmware', self.firmware), ('--lang', self.lang), (place, self.dest),
+                            ('--cpu', self.cpu)):
             if value.strip():
                 cmd += [flag, value.strip()]
         if root:

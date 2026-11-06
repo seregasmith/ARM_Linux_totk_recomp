@@ -206,6 +206,8 @@ Supported hosts:
 - **Linux arm64 with Docker Engine:** works the same way.
 - **An x86-64 host** runs the aarch64 container emulated (QEMU), as bbport's script does: it works, slowly. Building
   for aarch64 there without emulation (clang `--target` plus the sysroot, the tests under qemu-user) comes later.
+- **The reverse,** `--arch x86_64` on Apple Silicon, runs the x86-64 container under Rosetta or QEMU for x86-64 PCs
+  and the Steam Deck (`docs/building.md`, "The other architecture"). Not tried yet with this tree.
 
 ```
 ./build_docker.sh [--arch aarch64|x86_64] [tools|test|game|lock|shell|clean]
@@ -581,6 +583,19 @@ the portable folder without its RomFS, which goes beside it in `romfs-<version>/
 `~/.local/share/totk-recomp/<version>` and shares one profile between versions. The front is AppImage's static
 type-2 runtime (pinned in `tools/nix/default.nix`), and the game uses the device's Mesa. Code mods are unavailable in
 it: they need a rebuild, which a read-only image cannot do. `docs/building.md` has the details.
+
+### Games folder, Steam and the code level box (done 2026-11-06, not yet run on the device)
+
+The setup AppImage installs into a games folder, `~/.local/share/totk-recomp` by default: one install folder per update
+(`v121/`, `v143/`) and one shared `profile/`, which every install's `totk.ini` points at (`profile_dir = ../profile`).
+That is where the game AppImage keeps its data and saves, so an install there takes them over. With game files the
+setup identifies the update first and installs into its folder; without them it continues or rebuilds the highest
+version there. Once a version is installed, "Add to Steam" asks the running Steam client to add the highest one
+(`steam://addnonsteamgame/`, as SteamOS's "Add to Steam" does), through a script named `TotK Recomp <version>` beside
+`totk`. The window also gets a code level box (Automatic, a64, oryon; `TOTK_CPU` preselects one). Details:
+`docs/installer.md`, "Games folder and Steam (Linux)"; code in `installer/games.py`, `cli.py` (`--games`,
+`--add-to-steam`), `steps.py`, `gui.py` and `guilogic.py`; tests in `tests/installer_test.py` `GamesFolderTest` and
+`tests/installer_gui_test.py`.
 
 ### Three outputs, three modes (done)
 

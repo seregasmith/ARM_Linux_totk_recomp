@@ -35,7 +35,8 @@ The folder holds:
     AppRun, totk-setup.desktop, totk-setup.png   the AppImage entry: python/bin/python3 -m installer.gui, or with
                --cli as its first argument the command-line setup (python -m installer)
 
---appimage packs the folder with appimagetool and the static type-2 runtime (no libfuse2 on the host). The release
+--appimage packs the folder behind the static type-2 runtime (no libfuse2 on the host), with mksquashfs when it is on
+PATH (tools/package_appimage.py pack), else with appimagetool. The release
 needs no game files: the runtime libraries are compiled against a layout.h that holds only what the runtime reads, the
 module set (recomp/layout.py write_runtime_only). --prove, an optional check, compiles a lifted game version's C
 (generated/v121, else v143, and its build/extracted/<version>) and links build/release-linux-check/totk with the
@@ -589,12 +590,23 @@ def build_entry(out):
 
 
 def write_appimage(out, path):
-    tool = mr.fetch(per_arch('appimagetool'))
-    tool.chmod(0o755)
+    """The folder (an AppDir: AppRun, the desktop entry, the icon) behind the pinned type-2 runtime. With mksquashfs on
+    PATH (build_docker.sh's shell.nix has it) it packs the way tools/package_appimage.py pack does, which is also what
+    appimagetool does with --runtime-file; an emulated container needs that, since the appimagetool AppImage cannot
+    start there. Without mksquashfs, appimagetool."""
     runtime = mr.fetch(per_arch('runtime'))
     path.parent.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, ARCH=ARCH, APPIMAGE_EXTRACT_AND_RUN='1')
-    run([tool, '--no-appstream', '--runtime-file', runtime, out, path], env=env)
+    mksquashfs = shutil.which('mksquashfs')
+    if mksquashfs:
+        import tempfile
+        import package_appimage
+        with tempfile.TemporaryDirectory(prefix='setup-appimage-') as work:
+            package_appimage.pack(out, runtime, path, mksquashfs, work)
+    else:
+        tool = mr.fetch(per_arch('appimagetool'))
+        tool.chmod(0o755)
+        env = dict(os.environ, ARCH=ARCH, APPIMAGE_EXTRACT_AND_RUN='1')
+        run([tool, '--no-appstream', '--runtime-file', runtime, out, path], env=env)
     print(f'{path}: {mr.mib(path.stat().st_size)}')
 
 

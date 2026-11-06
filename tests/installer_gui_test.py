@@ -238,6 +238,25 @@ class FormTest(unittest.TestCase):
         (out / statefile.NAME).write_text('{nope', encoding='utf-8')
         self.assertFalse(Form(dest=str(out)).update_mode())
 
+    def test_games_folder(self):
+        games = self.dir / 'games'
+        self.assertEqual(Form(games=True).problems()[0], 'ui.need_games')
+        form = self.form(dest=str(games), games=True, cpu='oryon')
+        self.assertFalse(form.update_mode())
+        self.assertEqual(form.problems(), [])
+        cmd = form.command('py')
+        self.assertEqual(cmd[cmd.index('--games') + 1], str(games))
+        self.assertEqual(cmd[cmd.index('--cpu') + 1], 'oryon')
+        self.assertNotIn('--dest', cmd)
+        v121 = self._mkdir(games / 'v121')
+        statefile.save(v121, statefile.empty('r0') | {'version': '1.2.1', 'lang': 'ru'})
+        (v121 / ('totk.exe' if os.name == 'nt' else 'totk')).write_bytes(b'exe')
+        form = Form(dest=str(games), games=True)
+        self.assertEqual(form.installed(), ('1.2.1', v121))
+        self.assertEqual(form.installed_state()['lang'], 'ru')
+        self.assertEqual(form.problems(), [])
+        self.assertEqual(form.command('py'), ['py', '-m', 'installer', '--games', str(games)])
+
     @staticmethod
     def _mkdir(path):
         path.mkdir(parents=True, exist_ok=True)

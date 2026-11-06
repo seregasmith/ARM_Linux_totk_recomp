@@ -16,6 +16,9 @@ logs/: the next run lifts into the same gen/, where recomp/gen.py rewrites only 
 in build/ recompiles only those. A change of the mods' code cheats then costs the lift (about a minute) and the chunks
 it touches, not a full compile.
 
+With --games (installer/cli.py, the Linux window) the install folder is <games>/<version tag> and the saves live in
+<games>/profile, shared by every version there (installer/games.py): the cleanup sets profile_dir in totk.ini.
+
 Install folder build-cache/: cheats.status (tools/cheats.py), exefs.status (tools/exefs_patches.py) and rebuild.txt, the command that starts this setup in
 its rebuild mode on the install folder (installer/gui.py --rebuild), one argument per line; totk.exe runs it at start
 when an enabled mod has code cheats the build lacks (runtime/cheats.c).
@@ -34,6 +37,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+from . import games as gamesdir
 from . import ini
 from .layout import ARCH, CPU_LEVELS, DEFAULT_CPU, EXE, SUPPORTED, version_tag
 from .runner import InstallError, Step
@@ -190,6 +194,82 @@ def game_version(ctx):
     """The update this install is built from: what the check identified, else the recorded one. An install made before
     1.4.3 support records no version, and that install is 1.2.1: name it here rather than leaning on SUPPORTED's order."""
     return ctx.state.get('version', '1.2.1')
+
+
+def games_folder(ctx):
+    """The games folder of a --games run (installer/games.py); for a --dest run (a mods rebuild) the folder above an
+    install whose totk.ini shares the saves there (profile_dir = ../profile); else None."""
+    games = getattr(getattr(ctx, 'options', None), 'games', None)
+    if games:
+        return Path(games)
+    dest = getattr(ctx, 'dest', None)
+    try:
+        text = (Path(dest) / 'totk.ini').read_text(encoding='utf-8-sig') if dest else ''
+    except OSError:
+        text = ''
+    shared = re.search(rf'^\s*{gamesdir.PROFILE_KEY}\s*=\s*{re.escape(gamesdir.PROFILE_VALUE)}\s*$', text,
+                       re.IGNORECASE | re.MULTILINE)
+    return Path(dest).parent if shared else None
+
+
+def profile_dir(ctx):
+    """Where this install's saves live: <games>/profile in a games folder, else profile/ in the install folder."""
+    games = games_folder(ctx)
+    return games / gamesdir.PROFILE if games else ctx.dest / 'profile'
+
+
+def identify_update_file(update, keys, work, reporter):
+    """The display version of an update file ('1.4.3'), before an install folder is chosen (installer/cli.py --games
+    names the folder after it). Extracts only the update's ExeFS into work/update, as the check does, and identifies it
+    by hash. An NSZ is unpacked into work/unpacked/update.nsp in Check.unpack's layout, so the check reuses it once
+    that folder is moved into the install's temp folder. InstallError as the check raises them."""
+    update, keys, work = Path(update), Path(keys), Path(work)
+    for name, path in (('update', update), ('keys', keys)):
+        if not path.is_file():
+            raise InstallError('check.input_missing', input=name, path=str(path))
+    logs = work / 'logs'
+    logs.mkdir(parents=True, exist_ok=True)
+    game = update
+    try:
+        found = ncz.compressed(update)
+        if found is not None:
+            if found[0] != 'nsz':
+                raise InstallError('check.update_not_nsp')
+            size = ncz.unpacked_size(update)
+            folder = work / 'unpacked'
+            target, stamp = folder / 'update.nsp', folder / 'update.source'
+            st = update.stat()
+            tag = f'{update.resolve()}\n{st.st_size}\n{st.st_mtime_ns}\n{size}\n'
+            try:
+                current = target.stat().st_size == size and stamp.read_text(encoding='utf-8') == tag
+            except OSError:
+                current = False
+            if not current:
+                remove(stamp)
+                folder.mkdir(parents=True, exist_ok=True)
+                ncz.unpack(update, target, lambda d, t: reporter.progress('check', 'unpack_update', d, t, 'bytes'))
+                stamp.write_text(tag, encoding='utf-8')
+            game = target
+    except ncz.DamagedFile as e:
+        raise InstallError('check.input_damaged', input='update', path=str(e.path), detail=e.detail) from None
+    except ValueError as e:
+        raise_if_damaged(e, 'update', update)
+        raise InstallError('check.not_game_file', input='update') from None
+    out = work / 'update'
+    remove(out)
+    try:
+        extract.extract_exefs(game, keys, out, logs, update=True)
+    except extract.DamagedFile as e:
+        raise InstallError('check.input_damaged', input='update', path=str(update), detail=e.detail) from None
+    except ValueError:
+        raise InstallError('check.exefs_failed', input='update', log=str(logs / 'extract_exefs-update.log')) from None
+    try:
+        found = extract.identify_update(out / 'exefs', extract.load_expected())['display_version']
+    except ValueError:
+        found = 'unknown'
+    if found not in SUPPORTED:
+        raise InstallError('check.update_wrong_version', found=found, wanted=' / '.join(SUPPORTED))
+    return found
 
 
 def expected_update(ctx):
@@ -354,8 +434,14 @@ class Check(Step):
         if dest.exists() and not dest.is_dir():
             raise InstallError('check.dest_not_folder', path=str(dest))
         own = (ctx.temp, *ctx.temp.parents)   # a temp folder inside the install folder (installer/cli.py) is ours
-        if ctx.mode == 'install' and dest.is_dir() and any(p not in own for p in dest.iterdir()):
-            raise InstallError('check.dest_not_empty', path=str(dest))
+        if ctx.mode == 'install' and dest.is_dir():
+            other = [p for p in dest.iterdir() if p not in own]
+            # In a games folder, <games>/<version> may hold what the game AppImage wrote there as its data folder
+            # (settings, logs, caches): the install keeps it
+            if games_folder(ctx) is not None:
+                other = [p for p in other if p.name not in gamesdir.DATA_NAMES]
+            if other:
+                raise InstallError('check.dest_not_empty', path=str(dest))
         lang = requested_lang(ctx)
         if not lang:
             raise InstallError('check.lang_missing')
@@ -802,7 +888,7 @@ class Extract(Step):
         if report['romfs_size'] != expected['romfs']['size'] or report['romfs_sha256'] != expected['romfs']['sha256']:
             raise InstallError('extract.romfs_mismatch', version=game_version(ctx), size=report['romfs_size'],
                                sha256=report['romfs_sha256'][:16])
-        (dest / 'profile').mkdir(exist_ok=True)
+        profile_dir(ctx).mkdir(parents=True, exist_ok=True)
         remove(ctx.temp / 'unpacked')   # the NSPs unpacked from an NSZ or XCZ (Check.unpack)
         st = (romfs / 'romfs.bin').stat()
         return {'romfs_size': st.st_size, 'romfs_mtime_ns': st.st_mtime_ns}
@@ -1006,7 +1092,7 @@ class Compile(Step):
             '--ninja', layout.ninja,
             '--version', version_tag(game_version(ctx)), '--expected', layout.expected(game_version(ctx)),
             '--exefs', dest / 'exefs', '--romfs', dest / 'romfs',
-            '--profile', dest / 'profile'], parse)
+            '--profile', profile_dir(ctx)], parse)
         exe = build / ('totk' + EXE)
         if code or not exe.is_file():
             raise InstallError('compile.failed', code=code, log=str(log))
@@ -1231,12 +1317,23 @@ class Cleanup(Step):
     def run(self, ctx):
         rep, dest = ctx.reporter, ctx.dest
         rep.progress('cleanup', 'ini', force=True)
+        games = games_folder(ctx)
+        values = ()
+        if games:
+            # the saves of every version in the games folder: games/profile (installer/games.py); an install that
+            # already holds saves of its own while the shared folder holds others keeps its own, with a warning
+            kept = gamesdir.share_profile(dest, games)
+            if kept:
+                rep.warning('warn.profile_kept', path=str(kept), shared=str(games / gamesdir.PROFILE))
+            # an empty value counts as unset (runtime/cfg.h cfg_value): the game then takes profile/ beside itself
+            values = ((gamesdir.PROFILE_KEY, '' if kept else gamesdir.PROFILE_VALUE, 'files'),)
         try:
-            ini.write(dest, ctx.lang, ctx.layout.ini_example)
+            ini.write(dest, ctx.lang, ctx.layout.ini_example, values)
         except OSError as e:
             raise InstallError('cleanup.ini_failed', detail=str(e)) from None
         ctx.state['lang'] = ctx.lang
-        (dest / 'profile').mkdir(exist_ok=True)
+        if not games:
+            (dest / 'profile').mkdir(exist_ok=True)
         rep.progress('cleanup', 'temp', force=True)
         for stale in dest.glob('update-merge-*'):
             remove(stale)
