@@ -5,8 +5,6 @@
 #   nix-build tools/nix -A sysroot --argstr arch aarch64   Ubuntu 22.04 (glibc 2.35) from sysroot-arm64.lock.json
 #   nix-build tools/nix -A deps --argstr arch aarch64      build_game.py --deps: SDL3, static Opus, libvpx and zstd,
 #                                                          the Vulkan headers and VMA
-#   nix-build tools/nix -A appimageRuntime --argstr arch aarch64
-#                                                          AppImage's runtime for tools/package_appimage.py
 #
 # What runs on the handheld (totk, libSDL3.so.0, totk_xlate) is linked against the sysroot, not against Nix's glibc, so
 # it runs on any distribution with glibc 2.35 or newer, outside Nix. The sysroot's packages are pinned by
@@ -117,16 +115,4 @@ rec {
     cp ${sdl3.src}/LICENSE.txt $out/share/licenses/SDL3-LICENSE.txt
     cp ${pkgs.vulkan-headers.src}/LICENSE.md $out/share/licenses/vulkan-headers-LICENSE.md
   '';
-
-  # The front of an AppImage (tools/package_appimage.py, build_docker.sh appimage): AppImage's type-2 runtime, release
-  # 20251108 of github.com/AppImage/type2-runtime (MIT), pinned by hash. It is static, with libfuse3 and squashfuse
-  # inside, so the device needs no FUSE library (only /dev/fuse and fusermount to mount; else
-  # --appimage-extract-and-run), and it reads zstd squashfs.
-  appimageRuntime = pkgs.fetchurl {
-    url = "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-${arch}";
-    hash = {
-      aarch64 = "sha256-AMvfz5F8xsD/bTNH1Z4Moff0Wm3xpCig1tinhmTYdEQ=";
-      x86_64 = "sha256-L8qLRDySUQ8Ug6iD9gBhrQm0a5eLJjHIB82HOkfsJg0=";
-    }.${arch};
-  };
 }

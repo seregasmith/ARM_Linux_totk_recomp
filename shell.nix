@@ -24,7 +24,7 @@ pkgs.mkShell {
     llvm.lld llvm.llvm ninja gnumake cmake pkg-config git curl xz zstd file which
     python312 python314 uv dotnet-sdk_10
     spirv-tools glslang vulkan-tools dpkg patchelf
-    squashfs-tools   # mksquashfs: tools/package_appimage.py (build_docker.sh appimage)
+    squashfs-tools   # mksquashfs: packs the setup AppImage (tools/make_release_linux.py, build_docker.sh setup)
     xvfb-run         # a display for the setup window's check (build_docker.sh setup)
   ];
   # clang, clang++, lld and llvm-ar for the target (build_game.py --toolchain, build_xlate.py --llvm, the tests' CC)

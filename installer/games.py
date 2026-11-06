@@ -5,9 +5,9 @@
     <games>/profile/               the saves; each install's totk.ini sets profile_dir = ../profile (runtime/main.c
                                    portable_paths reads it), so 1.2.1 and 1.4.3 load each other's saves
 
-The default is ~/.local/share/totk-recomp ($XDG_DATA_HOME/totk-recomp), where the game AppImage
-(tools/package_appimage.py) keeps its per-version data folders and the same shared profile: an install there takes
-over the AppImage's settings, caches and saves.
+The default is ~/.local/share/totk-recomp ($XDG_DATA_HOME/totk-recomp), where the game AppImage of earlier builds kept
+its per-version data folders (TOTK_DATA_DIR) and the same shared profile: an install there takes over those settings,
+caches and saves.
 
 Steam: add_to_steam asks the running Steam client to add a game as a non-Steam game (steam://addnonsteamgame), as
 SteamOS's own "Add to Steam" does. Steam names the entry after the file, so the setup adds a two-line script named after
@@ -25,7 +25,7 @@ from .layout import SUPPORTED, version_tag
 PROFILE = 'profile'
 # totk.ini's key for the saves folder (runtime/cfg.c, TOTK_PROFILE_DIR), relative to the folder of totk
 PROFILE_KEY, PROFILE_VALUE = 'profile_dir', '../profile'
-# What the game writes into a data folder (runtime/cfg.h cfg_data_dir, the game AppImage's TOTK_DATA_DIR): a folder
+# What the game writes into a data folder (runtime/cfg.h cfg_data_dir; the earlier game AppImage's): a folder
 # holding only these may become an install folder, which keeps them
 DATA_NAMES = {'totk.ini', 'logs', 'shader-cache', 'pipeline-cache.bin', 'pipeline-keys.bin', 'shader-answers.bin',
               'shader-programs.bin', 'shader-prepared.bin', 'mesa-cache', 'mods', 'flight', PROFILE}

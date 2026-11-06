@@ -251,29 +251,22 @@ The sysroot's packages are pinned by `tools/nix/sysroot-<arm64|amd64>.lock.json`
 from the Ubuntu archive (`tools/nix/sysroot_lock.py`), and every run writes it anew when it is missing or the script's
 package list changed (commit it).
 
-For a handheld it makes three separate things, each with its own mode. All land in `build/install-<arch>`
-(`TOTK_OUT`):
+For a handheld it makes two things, each with its own mode. Both land in `build/install-<arch>` (`TOTK_OUT`):
 
 | Mode | What it makes | Game files (`TOTK_BASE`, `TOTK_UPDATE`, `TOTK_KEYS`) |
 |---|---|---|
-| `appimage` | `TotK-Recomp-<version>-<arch>.AppImage`: the game's code and the files its build made, without the RomFS | the first time; later runs reuse the extraction in the Docker volumes |
-| `romfs` | `romfs-<version>/romfs.bin`: the game's data (16 GB), for beside the game AppImage | always |
-| `setup` | `TotK-Setup-<arch>.AppImage`: the setup, which builds the game on the handheld from the player's own files | never |
+| `game` (the default) | `totk-<version>/`: the game built on the computer, as a portable folder (`tools/package_build.py`), with the RomFS inside unless `TOTK_ROMFS=0` | always |
+| `setup` | `TotK-Setup-<arch>.AppImage`: the setup, which builds the game on the handheld from the player's own files into the games folder and can add it to Steam | never |
 
 ```sh
 ./build_docker.sh test                       # the toolchain, then the checks that need no game files
-TOTK_BASE=~/Switch/totk.nsp TOTK_UPDATE=~/Switch/totk-143.nsp TOTK_KEYS=~/Switch/prod.keys ./build_docker.sh romfs
-./build_docker.sh appimage                   # the code only, from the extraction romfs left in the volumes
+TOTK_BASE=~/Switch/totk.nsp TOTK_UPDATE=~/Switch/totk-143.nsp TOTK_KEYS=~/Switch/prod.keys ./build_docker.sh
 ./build_docker.sh setup
 ```
 
-The game AppImage and `romfs.bin` are the two halves of a game built on the computer: the code changes with every
-rebuild, the data only with the update, so a rebuild copies 0.5 GB to the handheld instead of 16 GB. The setup is the
-other way to the same game: it carries the toolchain instead of the code and builds the game on the handheld.
-
-`game` (the default mode) builds the same game as `appimage` into a plain portable folder instead
-(`tools/package_build.py`, `build/install-<arch>/totk-<version>`, with the RomFS inside unless `TOTK_ROMFS=0`); copy
-it to the handheld and run `./totk --prepare-shaders` there once.
+Copy the `game` folder to the handheld and run `./totk --prepare-shaders` there once. The setup is what goes to
+players: it carries the toolchain instead of the game's code, builds the game on the handheld from their own files and
+adds it to Steam ([installer.md](installer.md), "Games folder and Steam (Linux)").
 
 ### The other architecture: x86-64 on an ARM machine
 
@@ -286,7 +279,7 @@ or QEMU. It is the same build, only slower, several times so for the compile.
 ./build_docker.sh --arch x86_64 test                    # the toolchain and the checks, as a first try
 TOTK_BASE=~/Switch/totk.nsp TOTK_UPDATE=~/Switch/totk-143.nsp TOTK_KEYS=~/Switch/prod.keys \
     ./build_docker.sh --arch x86_64 game                # the portable folder, build/install-x86_64/totk-<version>
-TOTK_ARCH=x86_64 TOTK_CPU=v2 ./build_docker.sh appimage # the same with TOTK_ARCH, for CPUs without AVX2
+TOTK_ARCH=x86_64 TOTK_CPU=v2 ./build_docker.sh game     # the same with TOTK_ARCH, for CPUs without AVX2
 ```
 
 - **Docker has to run the other platform's containers.** The script checks that first (a `linux/amd64` container
@@ -306,9 +299,8 @@ TOTK_ARCH=x86_64 TOTK_CPU=v2 ./build_docker.sh appimage # the same with TOTK_ARC
   must provide them: a v3 build stops there under an emulator without AVX2 or FMA, and `TOTK_CPU=v2` builds one that
   passes.
 - **The outputs** are those of aarch64: `game` the portable folder (Steam Deck: from Desktop Mode, or as a non-Steam
-  game), `appimage` and `romfs` the game AppImage and its RomFS, `setup` `TotK-Setup-x86_64.AppImage`. The x86-64
-  setup is built against Valve's Steam Runtime 3 "sniper" SDK, which `tools/make_release_linux.py` downloads itself, as
-  upstream's Linux release is; the Nix sysroot is aarch64's.
+  game), `setup` `TotK-Setup-x86_64.AppImage`. The x86-64 setup is built against Valve's Steam Runtime 3 "sniper" SDK,
+  which `tools/make_release_linux.py` downloads itself, as upstream's Linux release is; the Nix sysroot is aarch64's.
 - **On an x86-64 machine** the Docker build runs natively, and the Windows and Linux builds above ("Build", "Linux
   (in progress)") need no Docker at all.
 - **Not tried yet with this tree:** an x86_64 build under Rosetta on Apple Silicon. NativeAOT (the shader translator)
@@ -317,41 +309,13 @@ TOTK_ARCH=x86_64 TOTK_CPU=v2 ./build_docker.sh appimage # the same with TOTK_ARC
 
 The same works the other way: on an x86-64 host, `--arch aarch64` builds for the handheld under QEMU.
 
-### The game AppImage
-
-`./build_docker.sh appimage` extracts and lifts the game, compiles and links it and packs it as
-`TotK-Recomp-<version>-<arch>.AppImage` (`tools/package_appimage.py`). Without game files it reuses the extraction an
-earlier `appimage`, `romfs` or `game` run left in the Docker build volume (`TOTK_VERSION` picks one when there are
-several), and asks for the files when there is none. Put it beside `romfs-<version>/` from `romfs` on the handheld,
-run it with `--prepare-shaders` once, then start it. The image is read-only and about 0.5 GB:
-
-- What the game writes goes to `~/.local/share/totk-recomp/<version>` (`TOTK_DATA_DIR`, below; `XDG_DATA_HOME` moves
-  it). The saves go to `~/.local/share/totk-recomp/profile`, one for every version, since saves load on any of them.
-- The RomFS: `TOTK_ROMFS`, else the first folder that holds `romfs.bin` of: `romfs-<version>/` and `romfs/` beside the
-  AppImage, the AppImage's own folder, `romfs/` in the data folder, the data folder. Without one, it lists the paths
-  it looked at.
-- The front is AppImage's static type-2 runtime, release 20251108, pinned by hash in `tools/nix/default.nix`. It
-  mounts the image with FUSE when the device has `/dev/fuse` and `fusermount`; without them, start it with
-  `--appimage-extract-and-run`.
-- The game uses the device's Vulkan driver (Mesa's Turnip).
-- Code mods (ExeFS patches, code cheats) need a rebuild of the game, which a read-only image cannot do. RomFS mods
-  work: put them in `mods/` in the data folder.
-
-The AppImage holds code and data derived from your game: for your own devices only, never publish or share it.
+### The data folder
 
 `TOTK_DATA_DIR` (`runtime/cfg.h` `cfg_data_dir`) names the folder for everything the game writes: `totk.ini`, `logs/`,
 the profile (unless `TOTK_PROFILE_DIR` names one), the shader and pipeline caches (`shader-cache/`,
-`pipeline-cache.bin` and the files beside it), `mesa-cache/`, `mods/` and `flight/`. Unset, all of it stays next to
-`totk`, as before. The files the build made stay next to `totk` either way: `totk_xlate`, `romfs-index.bin`, the RomFS
+`pipeline-cache.bin` and the files beside it), `mesa-cache/`, `mods/` and `flight/`, for a launcher that keeps the
+game's folder read-only. Unset, all of it stays next to `totk`. The files the build made stay next to `totk` either way: `totk_xlate`, `romfs-index.bin`, the RomFS
 patches, `seed-*.bin`, `exefs/` and `build-cache/`.
-
-### The RomFS
-
-`./build_docker.sh romfs` extracts the game files (the update merged into the base game, then checked against the
-update's expected hashes, as for every build) and copies the RomFS image to `romfs-<version>/romfs.bin`, where the
-game AppImage looks first. A copy of the same size already there is kept. The extraction needs about 55 GB free in
-Docker's disk at its peak and stays in the build volume, so a later `appimage` run needs no game files. The RomFS is
-the game's own data: for your own devices only.
 
 ### The setup AppImage
 

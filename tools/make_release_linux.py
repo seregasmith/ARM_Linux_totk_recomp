@@ -35,10 +35,7 @@ The folder holds:
     AppRun, totk-setup.desktop, totk-setup.png   the AppImage entry: python/bin/python3 -m installer.gui, or with
                --cli as its first argument the command-line setup (python -m installer)
 
---appimage packs the folder behind the static type-2 runtime (no libfuse2 on the host), with mksquashfs when it is on
-PATH (tools/package_appimage.py pack), else with appimagetool. The release
-needs no game files: the runtime libraries are compiled against a layout.h that holds only what the runtime reads, the
-module set (recomp/layout.py write_runtime_only). --prove, an optional check, compiles a lifted game version's C
+--prove, an optional check, compiles a lifted game version's C
 (generated/v121, else v143, and its build/extracted/<version>) and links build/release-linux-check/totk with the
 folder's tools only, then runs the probes beside it.
 
@@ -109,7 +106,6 @@ PINS = {
     'appimagetool-arm64': ('https://github.com/AppImage/appimagetool/releases/download/1.9.1/'
                            'appimagetool-aarch64.AppImage',
                            'f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158'),
-    # the same file tools/nix/default.nix appimageRuntime pins (build_docker.sh appimage)
     'appimage-runtime-arm64': ('https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-aarch64',
                                '00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444'),
 }
@@ -589,19 +585,37 @@ def build_entry(out):
     (out / '.DirIcon').symlink_to('totk-setup.png')
 
 
+def pack_appimage(appdir, runtime, out, mksquashfs, work):
+    """The AppImage out: the type-2 runtime, then appdir as a squashfs image, which is made in the folder work first
+    (the output folder may be a slow share: build_docker.sh writes to the host's folder). zstd is what the runtime
+    reads; root-owned files and no extended attributes, as appimagetool makes them. out is written under a .part name
+    until it is complete."""
+    image = Path(work) / 'image.squashfs'
+    subprocess.run([mksquashfs, str(appdir), str(image), '-noappend', '-root-owned', '-no-xattrs', '-comp', 'zstd',
+                    '-quiet', '-no-progress'], check=True)
+    part = out.with_name(out.name + '.part')
+    with part.open('wb') as f:
+        f.write(Path(runtime).read_bytes())
+        with image.open('rb') as src:
+            shutil.copyfileobj(src, f, 8 << 20)
+    image.unlink()
+    part.chmod(0o755)
+    os.replace(part, out)
+
+
 def write_appimage(out, path):
     """The folder (an AppDir: AppRun, the desktop entry, the icon) behind the pinned type-2 runtime. With mksquashfs on
-    PATH (build_docker.sh's shell.nix has it) it packs the way tools/package_appimage.py pack does, which is also what
-    appimagetool does with --runtime-file; an emulated container needs that, since the appimagetool AppImage cannot
-    start there. Without mksquashfs, appimagetool."""
+    PATH (build_docker.sh's shell.nix has it) pack_appimage packs it, as appimagetool does with --runtime-file. An
+    emulated container needs that: an AppImage cannot start under binfmt emulation (its ELF header carries the AppImage
+    magic in e_ident's padding, which the emulator's binfmt_misc entry does not match), so the appimagetool AppImage
+    does not run there. Without mksquashfs, appimagetool."""
     runtime = mr.fetch(per_arch('runtime'))
     path.parent.mkdir(parents=True, exist_ok=True)
     mksquashfs = shutil.which('mksquashfs')
     if mksquashfs:
         import tempfile
-        import package_appimage
         with tempfile.TemporaryDirectory(prefix='setup-appimage-') as work:
-            package_appimage.pack(out, runtime, path, mksquashfs, work)
+            pack_appimage(out, runtime, path, mksquashfs, work)
     else:
         tool = mr.fetch(per_arch('appimagetool'))
         tool.chmod(0o755)

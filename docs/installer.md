@@ -259,9 +259,6 @@ CLI, which takes it in place of `--dest`). The default is `~/.local/share/totk-r
   it holds saves, and sets `profile_dir = ../profile` in `totk.ini` (`runtime/main.c` `portable_paths` reads it,
   relative to the folder of `totk`). When both hold saves it keeps the install's own and warns
   (`warn.profile_kept`). A rebuild started by the game (`--rebuild`, `--dest`) sees the setting and keeps it.
-- **The game AppImage's data.** That AppImage keeps its settings, logs and caches in the same `<games>/<version tag>`
-  folders and its saves in `<games>/profile`, so an install there takes them over: the check accepts a folder that
-  holds only what the game writes (`games.py` `DATA_NAMES`).
 - **Add to Steam.** The window's "Add to Steam" button, on the form once a version is installed and on the finish
   screen, asks the running Steam client to add the highest installed version as a non-Steam game, the way SteamOS's
   own "Add to Steam" does: it creates `/tmp/addnonsteamgamefile` and opens `steam://addnonsteamgame/<path>` with the

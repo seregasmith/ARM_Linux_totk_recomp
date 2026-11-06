@@ -436,8 +436,8 @@ class Check(Step):
         own = (ctx.temp, *ctx.temp.parents)   # a temp folder inside the install folder (installer/cli.py) is ours
         if ctx.mode == 'install' and dest.is_dir():
             other = [p for p in dest.iterdir() if p not in own]
-            # In a games folder, <games>/<version> may hold what the game AppImage wrote there as its data folder
-            # (settings, logs, caches): the install keeps it
+            # In a games folder, <games>/<version> may hold what the earlier game AppImage wrote there as its data
+            # folder (settings, logs, caches): the install keeps it
             if games_folder(ctx) is not None:
                 other = [p for p in other if p.name not in gamesdir.DATA_NAMES]
             if other:

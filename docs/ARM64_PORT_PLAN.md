@@ -77,9 +77,8 @@ Added after the first game build on the Mac (2026-11-04):
 - **hactool on aarch64 Linux.** `tools/hactool/memory-errors.patch`: the BKTR bucket moves used an overlapping
   `memcpy`, which aarch64 glibc copies wrongly (the update merge crashed with SIGSEGV), and a key line over 1023
   characters wrote past a buffer.
-- **The game AppImage.** `./build_docker.sh appimage` and `tools/package_appimage.py` (Phase 5, "The game AppImage"), on top
-  of `TOTK_DATA_DIR` in the runtime (`runtime/cfg.h` `cfg_data_dir`): everything the game writes can live outside its
-  folder.
+- **`TOTK_DATA_DIR`** in the runtime (`runtime/cfg.h` `cfg_data_dir`): everything the game writes can live outside its
+  folder. It came with a game AppImage, since removed (Phase 5, "Two outputs, two modes").
 
 - **Write tracking without userfaultfd.** The handheld's kernel (7.2.6) is built without `CONFIG_USERFAULTFD`, so
   nothing tracked guest writes: the back end copied every pool and re-uploaded every texture at each use, about
@@ -550,7 +549,7 @@ runtime library compiled against `write_runtime_only`'s `layout.h` (no game file
   - Then, after a game run, it runs `--prove` for the default level (a64), which builds and links the game with the
     bundle's own tools only, and runs the self-test and the kernel probe through the sysroot's loader (`--run-with`).
     The oryon library is built but not linked into a game there; the GPU probes run on the handheld.
-- **GPU driver.** The game uses the device's Mesa, as on x86-64 and in the game AppImage. Stock Turnip (Mesa 26.2.4)
+- **GPU driver.** The game uses the device's Mesa, as on x86-64. Stock Turnip (Mesa 26.2.4)
   runs the game on the handheld.
 - **On the handheld.**
   - The AppImage mounts with FUSE, else it runs with `--appimage-extract-and-run`.
@@ -575,40 +574,33 @@ runtime library compiled against `write_runtime_only`'s `layout.h` (no game file
 **Exit.** On the handheld, the AppImage builds the game from the NSPs and the keys, prepares the shaders, and the game
 plays.
 
-### The game AppImage (done)
-
-Not the setup AppImage above: `./build_docker.sh appimage` packs the game the Mac built
-(`TotK-Recomp-<version>-<arch>.AppImage`, `tools/package_appimage.py`), for the player's own devices only. It holds
-the portable folder without its RomFS, which goes beside it in `romfs-<version>/`; its AppRun sets `TOTK_DATA_DIR` to
-`~/.local/share/totk-recomp/<version>` and shares one profile between versions. The front is AppImage's static
-type-2 runtime (pinned in `tools/nix/default.nix`), and the game uses the device's Mesa. Code mods are unavailable in
-it: they need a rebuild, which a read-only image cannot do. `docs/building.md` has the details.
-
 ### Games folder, Steam and the code level box (done 2026-11-06, not yet run on the device)
 
 The setup AppImage installs into a games folder, `~/.local/share/totk-recomp` by default: one install folder per update
 (`v121/`, `v143/`) and one shared `profile/`, which every install's `totk.ini` points at (`profile_dir = ../profile`).
-That is where the game AppImage keeps its data and saves, so an install there takes them over. With game files the
-setup identifies the update first and installs into its folder; without them it continues or rebuilds the highest
-version there. Once a version is installed, "Add to Steam" asks the running Steam client to add the highest one
-(`steam://addnonsteamgame/`, as SteamOS's "Add to Steam" does), through a script named `TotK Recomp <version>` beside
-`totk`. The window also gets a code level box (Automatic, a64, oryon; `TOTK_CPU` preselects one). Details:
+That is where the game AppImage of earlier builds kept its data and saves, so an install there takes them over. With
+game files the setup identifies the update first and installs into its folder; without them it continues or rebuilds
+the highest version there. Once a version is installed, "Add to Steam" asks the running Steam client to add the
+highest one (`steam://addnonsteamgame/`, as SteamOS's "Add to Steam" does), through a script named
+`TotK Recomp <version>` beside `totk`. The window also gets a code level box (Automatic, a64, oryon; `TOTK_CPU` preselects one). Details:
 `docs/installer.md`, "Games folder and Steam (Linux)"; code in `installer/games.py`, `cli.py` (`--games`,
 `--add-to-steam`), `steps.py`, `gui.py` and `guilogic.py`; tests in `tests/installer_test.py` `GamesFolderTest` and
 `tests/installer_gui_test.py`.
 
-### Three outputs, three modes (done)
+### Two outputs, two modes (done 2026-11-06)
 
-`build_docker.sh` makes three separate things for a handheld, one mode each (`docs/building.md`, "ARM64 Linux and
-the Docker build"):
+`build_docker.sh` makes two things for a handheld, one mode each (`docs/building.md`, "ARM64 Linux and the Docker
+build"):
 
-- **`appimage`**, the game's code: the game AppImage without the RomFS. It needs the game files only while the Docker
-  build volume holds no extraction; later runs reuse it (`TOTK_VERSION` picks one of several).
-- **`romfs`**, the game's data: extraction (and its hash checks), then `romfs-<version>/romfs.bin` in `TOTK_OUT`. It
-  always needs the game files. The 16 GB copy moved here from `appimage`, so a code rebuild copies 0.5 GB.
-- **`setup`**, the setup AppImage: no game files, ever (done).
+- **`game`**, the default: the portable folder, RomFS included, built on the computer from the game files.
+- **`setup`**, the setup AppImage: no game files, ever. It is what players get: it builds the game on the handheld and
+  adds it to Steam (above).
 
-`game` keeps making the portable folder, RomFS included.
+Between 2026-11-04 and 2026-11-06 there was a third way: `appimage` packed the game's code read-only as
+`TotK-Recomp-<version>-<arch>.AppImage` (`tools/package_appimage.py`), with `TOTK_DATA_DIR` pointing at
+`~/.local/share/totk-recomp/<version>`, and `romfs` wrote its RomFS beside it. The games folder and "Add to Steam"
+replaced both, so the two modes, the packer and the pinned AppImage runtime in `tools/nix/default.nix` are gone. The
+runtime keeps `TOTK_DATA_DIR`, and the games folder takes over that AppImage's data folders (above).
 
 ### Gamepad navigation in the setup window
 

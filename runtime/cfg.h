@@ -15,8 +15,8 @@ void cfg_init(void);
 // Mesa's shader cache, the mods folder and flight dumps. TOTK_DATA_DIR (the environment only: totk.ini is one of
 // those files), created on first use; else the folder of the executable, as for a copied game folder. The files the
 // build made (totk_xlate, romfs-index.bin, seed-*.bin, exefs, build-cache) stay next to the executable either way,
-// so a read-only install (the AppImage, tools/package_appimage.py) works with TOTK_DATA_DIR. Writes the folder without
-// a trailing separator to out; 2 for TOTK_DATA_DIR, 1 for the executable's folder, 0 when neither fits cap.
+// so a read-only install works with TOTK_DATA_DIR. Writes the folder without a trailing separator to out; 2 for
+// TOTK_DATA_DIR, 1 for the executable's folder, 0 when neither fits cap.
 int cfg_data_dir(char *out, size_t cap);
 
 // Replaces the loaded keys with those of the file at path (tests). 1 when the file was read, 0 when missing.
