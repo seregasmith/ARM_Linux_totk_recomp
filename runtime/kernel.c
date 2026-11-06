@@ -1467,7 +1467,11 @@ int kern_svc(Cpu *c, uint32_t imm) {
         lock();
         thr_link(t);
         unlock();
-        if (!plat_thread_spawn(thread_main, t, "guest", HOST_STACK)) rt_fatal("kernel: cannot start a guest thread");
+        // The host thread's name carries the guest handle and priority, so per-thread tools (top -H, perf,
+        // tools/odin_sysmon.sh) can be matched with the TOTK_TRACE=sched lines. Linux keeps 15 characters.
+        char tname[16];
+        snprintf(tname, sizeof tname, "g%x p%d", t->handle, prio);
+        if (!plat_thread_spawn(thread_main, t, tname, HOST_STACK)) rt_fatal("kernel: cannot start a guest thread");
         if (rt_trace & RT_TRACE_SVC) {
             char d[128];
             rt_log("CreateThread %#x entry %s stack %#llx prio %d core %d", t->handle,

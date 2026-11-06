@@ -115,6 +115,7 @@
  "warn.dlss_kept": "安装文件夹中已有 DLSS 库（{path}）；安装程序将保留它。",
  "warn.profile_kept": "{path} 和共享文件夹 {shared} 中都有存档，因此此版本保留自己的存档。将其移入 {shared} 即可在各版本间共享。",
  "warn.dlss_download_failed": "无法从 {url} 下载 NVIDIA DLSS：{detail}。游戏无需它也能运行；下次运行安装程序时会重试。",
+ "warn.steam_refresh_failed": "无法更新 Steam 条目的脚本和会话性能分析器：{detail}。游戏照常启动。",
 
  "ui.title": "TotK 安装程序",
  "ui.rebuild_title": "正在为你的模组重新构建游戏",

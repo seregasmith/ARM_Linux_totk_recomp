@@ -110,6 +110,8 @@ PINS = {
                                '00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444'),
 }
 mr.PINS.update(PINS)   # one cache (toolchain/release-dl) and one fetch for both releases
+# tools/ files only the Linux install uses: the session profiler (installer/games.py SYSMON_FILES, TOTK_SYSMON)
+SYSMON_TOOLS = ('sysmon_launch.sh', 'odin_sysmon.sh', 'sysmon_report.py')
 
 # What differs between the target architectures: the pinned downloads (PINS names), the top folder of the LLVM
 # release, the glibc the folder may need at most (check_glibc) and how the sysroot comes (sniper: a pinned download;
@@ -789,6 +791,8 @@ def main():
     build_sysroot(out, sysroot, used_sysroot_files(out, llvm, sysroot, rtlib))
     build_python(out, llvm, sysroot)
     mr.build_sources(out, {})   # no profiles: the Linux setup compiles without one (installer/layout.py, pgo_dir)
+    for name in SYSMON_TOOLS:   # the session profiler, which the install copies beside the game (installer/games.py)
+        shutil.copy2(ROOT / 'tools' / name, out / 'tools' / name)
     collect_licenses(out, sysroot, deps)
     build_entry(out)
     mr.check_folder(out)

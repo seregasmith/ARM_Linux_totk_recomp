@@ -439,7 +439,8 @@ lift tests pass and `totk --probe-kernel` runs on the handheld.
      - `VK_EXT_graphics_pipeline_library` (the fallback path exists);
      - the subgroup size, 64 or 128 (`vk_caps.c` passes it to the translator).
    - **`TOTK_VK_RECORDER`:** off by default on AMD; measure on Turnip.
-   - **`TOTK_REPLAY_ASYNC`:** measure again, since the handheld has more, slower cores.
+   - **`TOTK_REPLAY_ASYNC`:** measure again, since the handheld has more, slower cores. Measured on the Odin 3
+     (2026-11-06): no change in frame rate ([arm64-performance.md](arm64-performance.md)).
 5. **Window and input.**
    - SDL3 runs on Wayland or X11 under the handheld's compositor (gamescope, Sway, KDE).
    - The built-in controller goes through SDL3's gamepad API.
@@ -454,7 +455,10 @@ shows no validation errors with the layers on.
 ## Phase 4: performance on ARM
 
 Measure first: `TOTK_CORE_DIAG`, the F10 overlay, and perf or simpleperf on the device. bbport's
-`odin_profile_remote.sh` is a template for collecting the data. Then work through these:
+`odin_profile_remote.sh` is a template for collecting the data. The setup's Steam entry profiles a whole session
+with `TOTK_SYSMON=1` (`tools/sysmon_launch.sh`, `tools/odin_sysmon.sh`, `tools/sysmon_report.py`);
+[arm64-performance.md](arm64-performance.md) holds the measurements on the Odin 3 and the suspects still to check. Then
+work through these:
 
 - **FP/SIMD.** The portable lowering emulates ARM semantics with extra NaN and FZ work that the hardware does for
   free. There are two options; measure and pick one.

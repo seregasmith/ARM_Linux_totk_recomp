@@ -6,6 +6,7 @@ Run: python tests/installer_test.py
 import http.client
 import io
 import json
+import os
 import re
 import sys
 import tempfile
@@ -775,6 +776,13 @@ class GamesFolderTest(unittest.TestCase):
         script = games.steam_link(dest, '1.4.3')
         self.assertEqual(script.name, 'TotK Recomp 1.4.3')
         self.assertTrue(script.read_text().startswith('#!/bin/sh'))
+        if os.name != 'nt':   # the session profiler beside it, which the script sources (TOTK_SYSMON)
+            self.assertEqual(sorted(p.name for p in (dest / 'sysmon').iterdir()),
+                             ['launch.sh', 'odin_sysmon.sh', 'sysmon_report.py'])
+            self.assertIn('sysmon/launch.sh', script.read_text())
+            script.write_text('#!/bin/sh\nexec old\n')   # an entry from an earlier release: an install updates it
+            self.assertEqual(games.refresh_steam_links(dest), [script])
+            self.assertEqual(script.read_text(), games.STEAM_SCRIPT)
         allow = Path(self.tmp.name) / 'addnonsteamgamefile'
         with mock.patch.object(games, 'STEAM_ALLOW', allow), mock.patch.object(games, 'steam_running', lambda: True), \
                 mock.patch.object(games.shutil, 'which', lambda name: '/usr/bin/steam' if name == 'steam' else None), \

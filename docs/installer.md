@@ -262,10 +262,15 @@ CLI, which takes it in place of `--dest`). The default is `~/.local/share/totk-r
 - **Add to Steam.** The window's "Add to Steam" button, on the form once a version is installed and on the finish
   screen, asks the running Steam client to add the highest installed version as a non-Steam game, the way SteamOS's
   own "Add to Steam" does: it creates `/tmp/addnonsteamgamefile` and opens `steam://addnonsteamgame/<path>` with the
-  `steam` command (`xdg-open` without one). Steam names the entry after the file, so the setup adds a two-line script
+  `steam` command (`xdg-open` without one). Steam names the entry after the file, so the setup adds a short script
   `TotK Recomp <version>` beside `totk` that starts it. Steam must be running; a Steam pid file that names no live
   process stops it with a message. Whether Steam took the request is not reported back. `--add-to-steam` does the same
   from the command line.
+- **The session profiler.** The script sources `sysmon/launch.sh` first, which starts the session profiler when the
+  entry's launch options set `TOTK_SYSMON=1` ([arm64-performance.md](arm64-performance.md)). The install copies
+  `sysmon/` from the release's `tools/` (`games.py` `install_sysmon`; `tools/make_release_linux.py` `SYSMON_TOOLS`).
+  The cleanup step also rewrites a script an earlier "Add to Steam" left there, so the Steam entry keeps working with
+  the new release (`games.py` `refresh_steam_links`).
 
 ## Constraints
 

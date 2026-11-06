@@ -115,6 +115,7 @@
  "warn.dlss_kept": "Já existe uma biblioteca DLSS na pasta de instalação ({path}); a instalação a mantém.",
  "warn.profile_kept": "{path} e a pasta compartilhada {shared} têm saves, então esta versão mantém os seus. Mova-os para {shared} para compartilhá-los entre as versões.",
  "warn.dlss_download_failed": "Não foi possível baixar o NVIDIA DLSS de {url}: {detail}. O jogo funciona sem ele; a próxima execução da instalação tenta de novo.",
+ "warn.steam_refresh_failed": "Não foi possível atualizar o script da entrada da Steam e o perfilador de sessão: {detail}. O jogo inicia como antes.",
 
  "ui.title": "Instalação do TotK",
  "ui.rebuild_title": "Recompilando o jogo para os seus mods",

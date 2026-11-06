@@ -10,8 +10,9 @@ its per-version data folders (TOTK_DATA_DIR) and the same shared profile: an ins
 caches and saves.
 
 Steam: add_to_steam asks the running Steam client to add a game as a non-Steam game (steam://addnonsteamgame), as
-SteamOS's own "Add to Steam" does. Steam names the entry after the file, so the setup adds a two-line script named after
-the game and its version that starts totk beside it.
+SteamOS's own "Add to Steam" does. Steam names the entry after the file, so the setup adds a short script named after
+the game and its version that starts totk beside it. The script sources sysmon/launch.sh first, the session profiler
+that TOTK_SYSMON=1 in Steam's launch options turns on (install_sysmon, docs/arm64-performance.md).
 """
 import os
 import shutil
@@ -33,7 +34,15 @@ DATA_NAMES = {'totk.ini', 'logs', 'shader-cache', 'pipeline-cache.bin', 'pipelin
 STEAM_NAME = 'TotK Recomp {version}'
 STEAM_SCRIPT = ('#!/bin/sh\n'
                 '# Starts totk beside this file; Steam names its library entry after it (installer/games.py).\n'
-                'exec "$(dirname "$(readlink -f "$0")")/totk" "$@"\n')
+                '# sysmon/launch.sh starts the session profiler first when TOTK_SYSMON is set (docs/arm64-performance.md).\n'
+                'here=$(dirname "$(readlink -f "$0")")\n'
+                '[ ! -f "$here/sysmon/launch.sh" ] || . "$here/sysmon/launch.sh"\n'
+                'exec "$here/totk" "$@"\n')
+# The session profiler in an install's sysmon/ folder, from the release's tools/ (tools/make_release_linux.py
+# SYSMON_TOOLS): its name in tools/ -> its name in sysmon/
+SYSMON = 'sysmon'
+SYSMON_FILES = {'sysmon_launch.sh': 'launch.sh', 'odin_sysmon.sh': 'odin_sysmon.sh', 'sysmon_report.py': 'sysmon_report.py'}
+TOOLS = Path(__file__).resolve().parents[1] / 'tools'   # the release folder's tools/, or the repository's
 # The file that lets a steam://addnonsteamgame request through (SteamOS's steamos-add-to-steam creates it the same way)
 STEAM_ALLOW = Path('/tmp/addnonsteamgamefile')
 
@@ -98,14 +107,43 @@ def share_profile(dest, games):
     return None
 
 
-def steam_link(dest, version):
-    """dest/<STEAM_NAME>: the script that starts totk, named for Steam's library."""
-    path = Path(dest) / STEAM_NAME.format(version=version)
+def install_sysmon(dest):
+    """dest/sysmon/: the session profiler, copied anew from TOOLS. None on Windows, or when TOOLS lacks a file."""
+    if os.name == 'nt' or not all((TOOLS / name).is_file() for name in SYSMON_FILES):
+        return None
+    folder = Path(dest) / SYSMON
+    folder.mkdir(exist_ok=True)
+    for src, name in SYSMON_FILES.items():
+        shutil.copyfile(TOOLS / src, folder / name)
+        (folder / name).chmod(0o755 if name.endswith('.sh') else 0o644)
+    return folder
+
+
+def write_steam_script(path):
     if not path.is_file() or path.read_text(encoding='utf-8', errors='replace') != STEAM_SCRIPT:
         path.unlink(missing_ok=True)
         path.write_text(STEAM_SCRIPT, encoding='utf-8', newline='\n')
     path.chmod(0o755)
+
+
+def steam_link(dest, version):
+    """dest/<STEAM_NAME>: the script that starts totk, named for Steam's library, with the profiler beside it."""
+    install_sysmon(dest)
+    path = Path(dest) / STEAM_NAME.format(version=version)
+    write_steam_script(path)
     return path
+
+
+def refresh_steam_links(dest):
+    """After an install: the profiler, and the scripts an earlier "Add to Steam" left in dest brought up to date, so a
+    Steam entry that exists already runs the new ones. Returns the scripts."""
+    if os.name == 'nt':
+        return []
+    install_sysmon(dest)
+    found = sorted(Path(dest).glob(STEAM_NAME.format(version='*')))
+    for path in found:
+        write_steam_script(path)
+    return found
 
 
 # Where Steam's launcher script writes the process id of the running client: the native install, the Flatpak's

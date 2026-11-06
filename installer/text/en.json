@@ -115,6 +115,7 @@
  "warn.dlss_kept": "A DLSS library is already in the install folder ({path}); the setup keeps it.",
  "warn.profile_kept": "{path} and the shared {shared} both hold saves, so this version keeps its own. Move them into {shared} to share them between versions.",
  "warn.dlss_download_failed": "NVIDIA DLSS could not be downloaded from {url}: {detail}. The game runs without it; the next setup run tries again.",
+ "warn.steam_refresh_failed": "The script of the Steam entry and the session profiler could not be updated: {detail}. The game starts as before.",
 
  "ui.title": "TotK Setup",
  "ui.rebuild_title": "Rebuilding the game for your mods",

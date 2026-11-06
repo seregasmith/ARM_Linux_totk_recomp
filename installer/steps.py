@@ -1341,6 +1341,10 @@ class Cleanup(Step):
             remove(ctx.temp / name)
         romfs_problem(dest / 'romfs', expected_update(ctx))
         write_rebuild_command(ctx)
+        try:   # the session profiler and an existing Steam entry's script, in step with this release
+            gamesdir.refresh_steam_links(dest)
+        except OSError as e:
+            rep.warning('warn.steam_refresh_failed', detail=str(e)[:300])
         return {}
 
 

@@ -266,7 +266,8 @@ TOTK_BASE=~/Switch/totk.nsp TOTK_UPDATE=~/Switch/totk-143.nsp TOTK_KEYS=~/Switch
 
 Copy the `game` folder to the handheld and run `./totk --prepare-shaders` there once. The setup is what goes to
 players: it carries the toolchain instead of the game's code, builds the game on the handheld from their own files and
-adds it to Steam ([installer.md](installer.md), "Games folder and Steam (Linux)").
+adds it to Steam ([installer.md](installer.md), "Games folder and Steam (Linux)"). `TOTK_SYSMON=1 %command%` in the
+Steam entry's launch options profiles a session ([arm64-performance.md](arm64-performance.md)).
 
 ### The other architecture: x86-64 on an ARM machine
 
