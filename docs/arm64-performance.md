@@ -1,6 +1,6 @@
 # ARM64 performance: what holds the frame on the handheld
 
-Status: written 2026-11-05, updated 2026-11-06 after three captures. Everything under "Suspects" is a hypothesis
+Status: written 2026-11-05, updated 2026-11-09 after the write-tracking tests. Everything under "Suspects" is a hypothesis
 drawn from the code, the bring-up log and that capture. Replace each one with what the session profiler (below) shows,
 and move the ones it rules out to "Ruled out" with the reason.
 
@@ -160,6 +160,32 @@ Other facts of the capture:
 - **The prime cores reached 98-100 C.** The `cpufreq-cpu6` cooling device went up to state 4 of 15, so in a long
   session temperature starts to lower their clock.
 
+## Write tracking tests (2026-11-09)
+
+Six sessions back to back, game 1.4.3, each at the far view; the reports' slowest 20 s of play. The recorder is on by
+default on Turnip.
+
+| Blocks KiB / cooldown ms | Recorder | fps | Frame ms | Replay ms | Shadow copies | Texture re-uploads a frame | Write faults a frame |
+|---|---|---|---|---|---|---|---|
+| 2048 / 1024 (default) | on | 30.7 | 32.5 | 21.3 | 8.1 ms (113 MiB) | 52 | 7 |
+| 2048 / 1024 (default) | off | 34.6 | 28.9 | 21.1 | 7.3 ms (111 MiB) | 53 | 4 |
+| 256 / 256 | on | 35.1, 36.3 | 28.5, 27.6 | 19.6, 16.4 | 4.9, 4.8 ms (60 MiB) | 29, 25 | 24, 25 |
+| 256 / 256 | off | 38.4 | 26.1 | 16.7 | 3.9 ms (57 MiB) | 19 | 21 |
+| 64 / 64 | on | 37.3 | 26.8 | 16.1 | 3.7 ms (41 MiB) | 13 | 107 |
+
+- **Smaller blocks and a shorter cooldown halve the copies and the re-uploads.** Against the default with the same
+  recorder setting, 256 / 256 gave +3.8 fps with the recorder off, and +4.4 to +5.6 with it on.
+- **64 / 64 is close to 256 / 256,** with five times the write faults: 107 a frame did not show in the frame rate.
+  The faults land on the game threads that write, which have room (1.7-2.0 of 3 virtual cores busy). The copies land
+  on the render thread, which holds the frame.
+- **The recorder off was faster in both pairs:** +2.1 to +3.3 fps at 256 / 256, +3.9 at the default. With the
+  recorder, the render thread ran on the prime cores 34-92% of the time (2.8-3.0 GHz); without it, 98-100%
+  (3.04-3.06 GHz).
+- **The default with the recorder on ran fifth in a row, and hot.** The prime cores reached 101 C, and the cpufreq
+  cooling devices went to 6 and 7 of 15, so part of its loss is temperature.
+- **One session per setting.** The slowest 20 s fell at different places in each, so differences of 1-2 fps are within
+  the noise.
+
 ## Suspects
 
 Most likely first. "Shows as" is what the session profiler's report and the log say when the suspect is the cause.
@@ -234,8 +260,9 @@ Launches at the far view, each with `TOTK_SYSMON=1`. Compare the reports' `shado
 
 ### Open
 
-- **The recorder thread** (`TOTK_VK_RECORDER`, on by default on Turnip): one A/B cycle, inconclusive (third
-  capture).
+- **The recorder thread** (`TOTK_VK_RECORDER`, on by default on Turnip). One A/B cycle in the third capture was
+  inconclusive. In the write tracking tests, off was 2-4 fps faster in both pairs. A back-to-back pair with the device
+  cool would make it the default on Turnip.
 
 ## Profiling a session from Steam's gaming mode
 
