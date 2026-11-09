@@ -1,6 +1,6 @@
 # ARM64 performance: what holds the frame on the handheld
 
-Status: written 2026-11-05, updated 2026-11-06 after the first two captures. Everything under "Suspects" is a hypothesis
+Status: written 2026-11-05, updated 2026-11-06 after three captures. Everything under "Suspects" is a hypothesis
 drawn from the code, the bring-up log and that capture. Replace each one with what the session profiler (below) shows,
 and move the ones it rules out to "Ruled out" with the reason.
 
@@ -103,7 +103,8 @@ What it says:
 - **`g1004 p30` submits the frames.** With the replay moved to its own thread, its share of the session went from
   58% (first capture) to 1%, and `vk replay` took that work over. In the default mode the replay runs on `g1004 p30`
   and costs about two thirds of a core in play.
-- **A chain of waits holds the frame, not one thread or the GPU.** No thread is near a full core. The GPU is idle a
+- **A chain of waits holds the frame, not one thread or the GPU.** (The third capture, with the log, corrects this:
+  the replay holds the frame, wherever it runs.) No thread is near a full core. The GPU is idle a
   third of the time. Moving the replay off the game thread did not change the frame rate. What remains is a chain of
   hand-offs between the game's threads, the replay, the recorder and the GPU, where each waits for the one before. The
   sched lines show it: the render and main threads' longest waits, by object and by the thread whose signal ended
@@ -111,53 +112,113 @@ What it says:
 - **The governor does not lower the clocks in play.** Both clusters stay at their limits, so placement matters only
   for the 12% between them.
 
-Next measurements, all at the default settings:
+With the Steam launch log, the report has the frame rates of this session too. Its slowest 20 s ran at 32.8 fps,
+and the third capture explains them.
 
-- The game's lines of the Steam launch log of both sessions, for the frame rates and the sched lines.
-- The critical path of slow frames (`TOTK_CRIT`).
+## Third capture (2026-11-06, the recorder A/B)
+
+This session ran on the build with the Steam entry's profiler, game 1.4.3: 136 s, 263 samples, with the game's log
+aligned. Its launch options were `TOTK_SYSMON=1 TOTK_AB=20 TOTK_VK_RECORDER=ab`. The replay ran on the submitting
+thread (the default).
+
+**The recorder A/B is inconclusive.** `tools/ab_summary.py --skip 30` gives 40.9 fps with the recorder off and 38.4 fps
+with it on (+6.5% frame time). But the play held one cycle only. The two "on" blocks came first and covered the
+heaviest part of the run (40-60 s); the "off" blocks came later. A repeat with `TOTK_AB=5`, standing at one spot for
+two minutes, would settle it. Either way the recorder is not the main cost.
+
+**The submitting thread holds the frame.** In the slowest windows (frames 1800-2160, 23-31 fps), the sched lines show:
+
+- the render thread `0x1004` (`g1004 p30`) in its host call, the replay, 79-83% of the time, and waiting for the main
+  thread the rest;
+- the main thread waiting 19-28% of the time for a lock the render thread holds.
+
+At about 40 fps the two even out: the render thread is in the replay 66-70% of the time and waits for the main
+thread 29-33%. `g1004 p30` ran on the prime cores 93% of the time, at 3008 MHz on average.
+
+**Two costs in the replay grow with the far view, and both come from the 2 MiB write tracking.** Per frame, from the
+log's `mem: shadow` and `texture re-uploads` lines:
+
+| Where | Frame | Replay | Shadow copies | Texture re-uploads |
+|---|---|---|---|---|
+| the 60 fps stretches | 16.7 ms | 0.4-3 ms | 5-15 MiB, 0.5-1.6 ms | 1-2 textures, 2-8 MiB, 0.2-0.7 ms |
+| the far view | 23-39 ms | 15-31 ms | 73-100 MiB, 5.3-6.7 ms | 17-25 textures, about 32 MiB, 4.5-4.9 ms |
+
+- **Together the two take 10-11.5 ms of each slow frame**, on the thread that holds it.
+- **The GPU needs 13.6-17.4 ms per frame there.** It waits 9-13 ms a frame for the next submission.
+- **Most of the tracked memory counts as written.** The write watch reports about 354 regions (708 MiB) a frame as
+  written, 239 of them in their cooldown (`runtime/memory.c` `region_written`). A region written anywhere counts as
+  written whole, so the pools in it are copied again and the textures in it re-uploaded, changed or not.
+- **The render thread's `texture` share is these re-uploads.** It is blocked on textures 15-20% of the time in the
+  far view, which matches the re-upload time.
+- **The second capture shows the same.** With the replay on its own thread, its slowest 20 s had 7.2 ms of shadow
+  copies (90 MiB) and a `texture` share of 17%.
+
+Other facts of the capture:
+
+- **New areas add pipeline builds.** The render thread's `pipeline` share was 13-49% in the first minute in a new
+  area, and 0% after.
+- **The prime cores reached 98-100 C.** The `cpufreq-cpu6` cooling device went up to state 4 of 15, so in a long
+  session temperature starts to lower their clock.
 
 ## Suspects
 
 Most likely first. "Shows as" is what the session profiler's report and the log say when the suspect is the cause.
 
-1. **A chain of waits between the game's threads and the GPU.** The second capture showed no thread near a full core
-   and the GPU idle a third of the time. The candidates:
-   - **The game waits for the GPU's previous frame.** NVN sync waits become fence waits, and the GPU drains before
-     the next frame's work arrives.
-   - **The hand-offs of a frame's commands.** The submitting thread passes them to the replay, the replay to the
-     recorder (`runtime/vk_rec.c`; `runtime/vk_exec.c` splits the command buffer every 64 draws between passes, in parts of at least 1000 us), and the recorder
-     to the queue. Each waits for the one before.
-   - **The present path.** The `vk present` thread presents in mailbox mode, at a present interval of 1 to 3.
-   - **Write-backs of GPU results into guest memory.** The shadow storage's "written back", such as the grass maps
-     written back at fence waits.
+1. **Write tracking per 2 MiB region: shadow copies and texture re-uploads.**
+   - Measured in the third capture: 10-11.5 ms of the slow frames, on the render thread, which holds the frame there.
+   - Cause: the kernel has no userfaultfd, so `runtime/memory.c` tracks guest writes per 2 MiB region (`FRZ_SHIFT`,
+     the same unit as the frozen regions). Any write in a region marks all of it.
+   - Shows as: the log's `mem: shadow ... MiB copied in` and `texture re-uploads` per frame; the render thread's
+     `texture` share.
+   - Fix, in the game: a finer unit than 2 MiB, or page tracking by write faults (`mprotect` and the ESR path of
+     Phase 2; Phase 3 step 6 of `docs/ARM64_PORT_PLAN.md`). `TOTK_WW_REGION_KB` (64 to 2048, default 2048) tries the
+     first: a write fault thaws only its block of the region, and the region counts as written in those blocks
+     (`runtime/memory.c` `thaw_block_locked`, `region_written`). Smaller blocks report less, but each block's first
+     write after a freeze costs a fault. Skipping the re-upload of a texture whose content did not
+     change is a second line of defence. A kernel built with `CONFIG_USERFAULTFD` and `CONFIG_PTE_MARKER_UFFD_WP`
+     would give page tracking as it is, but that is the device's kernel, not the game.
+2. **The rest of the replay.** Without those two costs the replay still took 5-20 ms of the slow frames. That is the
+   translation of the NVN command stream into Vulkan, which grows with the draws of a far view.
+   - Shows as: the log's `replay avg` against the shadow and re-upload times.
+   - Fix: a profile of the replay (`perf record` on the device), then the hot paths.
+3. **The main thread and its workers.** At about 40 fps the render thread waits for the main thread a third of the
+   time. The main thread waits for the p44 workers (`0x1037`, `0x1038`), and for a host call
+   (`exe+0xc649360`, 15-20%).
+   - Shows as: the sched lines' "render wait" on the main thread and "main wait" entries.
+   - The lifted code's speed is part of this: `-O1` (`tools/build_game.py` `GEN_FLAGS`; the oryon code level, no PGO
+     on aarch64), six register locals (`recomp/regs.py` `LOCALS`) and the portable FP/SIMD lowering
+     (`runtime/simd.h`). The fixes are those of Phase 4: a NEON backend of `simd.h`, more register locals, `-O2` and a
+     profile.
+4. **Pipeline builds in new areas.** They add 13-49% of the render thread's time for a minute after arriving
+   somewhere new. The pipeline cache keeps them for the next visit.
+5. **Where the critical threads run.** Nothing pins threads on aarch64. `TOTK_ONE_PER_CORE` (`runtime/perf.c`
+   `cpu_placement`) is for SMT and does nothing here. The render thread already ran on the prime cores 93% of the
+   time in the third capture.
+   - Fix if needed: the game places them itself (`plat_thread_affinity`, `runtime/platform/linux.c`), the "Cores"
+     item of Phase 4 (`docs/ARM64_PORT_PLAN.md`). No system setting changes.
+6. **The GPU's own time.** Look here once the GPU is busy 90% or more; it was 54-62% in the slow stretches. Turnip
+   chooses GMEM (tiled) or sysmem rendering per render pass, and a pass split by a barrier or a copy stores and
+   reloads its tiles. Mesa's u_trace (`MESA_GPU_TRACES`, `MESA_GPU_TRACEFILE`; see Mesa's `docs/envvars.rst`) times
+   each render pass on Turnip.
 
-   - Shows as:
-     - the log's fence wait per frame on the render thread;
-     - "GPU idle ... waiting for the next submission" against "with work queued";
-     - the sched lines' "render wait" and "main wait" entries with large shares on one object;
-     - in `TOTK_CRIT`, the same waits on every slow frame.
-2. **The speed of the lifted code.** Every link of the chain above is code. A shorter link shortens the chain even
-   where no thread is saturated. The game gets three virtual cores, as on the Switch. The generated C is compiled at
-   `-O1` (`tools/build_game.py` `GEN_FLAGS`; the oryon code level, no PGO on aarch64), with six register locals
-   (`recomp/regs.py` `LOCALS`) and the portable FP/SIMD lowering (`runtime/simd.h`). The replay is host C at `-O2`.
-   - Shows as: the links on the critical path that are CPU time (`run` in the sched lines) rather than waits.
-   - Fix: Phase 4's NEON backend of `simd.h`, more register locals, `-O2` and a profile for the hottest chunks; a
-     profile of the replay (`perf record`).
-3. **Where the critical threads run.** Nothing pins threads on aarch64. `TOTK_ONE_PER_CORE` (`runtime/perf.c`
-   `cpu_placement`) is for SMT and does nothing here. In play both clusters sit at their limits, so the gain is the 12%
-   between them (3072 against 2746 MHz) for the threads on the critical path.
-   - Shows as: those threads' `on prime` column low.
-   - Fix: the game places them itself (`plat_thread_affinity`, `runtime/platform/linux.c`), the "Cores" item of
-     Phase 4 (`docs/ARM64_PORT_PLAN.md`). No system setting changes.
-4. **Shadow copies with region write tracking.** The kernel has no userfaultfd, so `runtime/memory.c` tracks guest
-   writes per 2 MiB region. A region that was written counts as written whole, and its pools are copied again at
-   each submit. That costs CPU time and LPDDR bandwidth, which the GPU shares.
-   - Shows as: "shadow storage: ... MiB copied in per frame in ... ms" grows in the slow stretch.
-   - Fix: Phase 4's zero-copy guest memory, or a finer tracking of writes in the game. A kernel with
-     `CONFIG_USERFAULTFD` would give page tracking, but that is the device's kernel, not the game.
-5. **The GPU's own time.** Look here once the GPU is busy 90% or more. Turnip chooses GMEM (tiled) or sysmem
-   rendering per render pass, and a pass split by a barrier or a copy stores and reloads its tiles. Mesa's u_trace
-   (`MESA_GPU_TRACES`, `MESA_GPU_TRACEFILE`; see Mesa's `docs/envvars.rst`) times each render pass on Turnip.
+### Tests for suspect 1
+
+Launches at the far view, each with `TOTK_SYSMON=1`. Compare the reports' `shadow copy ms (MiB)`, the log's
+`texture re-uploads` and the frame rate:
+
+1. `TOTK_SHADOW=0`: no shadow copies; the GPU reads guest memory itself. It needs `VK_EXT_external_memory_host`
+   (`vulkaninfo | grep external_memory_host`); without it the game stops at its Vulkan check.
+2. `TOTK_FREEZE_IDLE=8` (default 60): idle regions are frozen after 8 submissions instead of 60, so fewer count as
+   written.
+3. `TOTK_WW_REGION_KB=256`, then `64`: blocks of 256 or 64 KiB in place of the 2 MiB region. More write faults
+   (`thaws by a write` in the log's `mem: write-watch` lines) are the cost to watch.
+4. `TOTK_WW_COOL_MS=128`, then `32` (default 1024): the longest a region found written stays thawed. While thawed it
+   counts as written at every query (239 of the 354 regions reported a frame in the third capture were in that
+   cooldown), so a shorter cap reports less, and a region the game writes every frame takes a write fault and a
+   protection change more often. Also together with `TOTK_WW_REGION_KB=256`.
+
+   The idle freeze of test 2 does little under region tracking: a thawed region reports all its pages at every query,
+   so it never looks idle, and region_written refreezes it after its cooldown instead.
 
 ### Ruled out
 
@@ -166,10 +227,15 @@ Most likely first. "Shows as" is what the session profiler's report and the log 
     (`g1004 p30`) also replays its commands into Vulkan.
   - The test: `TOTK_REPLAY_ASYNC=1` ("GPU frame prep on its own thread" in the menu) moves the replay to its own
     thread.
-  - The result: on the Odin 3 the frame rate did not change.
-- **The GPU's clock** (2026-11-06). The GPU was at its top 1100 MHz throughout play in both captures.
+  - The result: on the Odin 3 the frame rate did not change. The replay is the slowest stage wherever it runs.
+- **The GPU's clock** (2026-11-06). The GPU was at its top 1100 MHz throughout play in every capture.
 - **The governor lowering the CPU clocks in play** (2026-11-06). Both clusters sat at their limits throughout play in
-  the second capture.
+  the second and third captures.
+
+### Open
+
+- **The recorder thread** (`TOTK_VK_RECORDER`, on by default on Turnip): one A/B cycle, inconclusive (third
+  capture).
 
 ## Profiling a session from Steam's gaming mode
 
