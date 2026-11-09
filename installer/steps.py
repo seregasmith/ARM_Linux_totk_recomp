@@ -1068,6 +1068,25 @@ class Lift(Step):
 NINJA_LINE = re.compile(r'^\[(\d+)/(\d+)\] ')
 
 
+# The generated C's optimisation levels, as tools/build_game.py GEN_OPTS; build_game.py's own default applies when
+# neither --gen-opt nor TOTK_GEN_OPT names one.
+GEN_OPTS = ('O1', 'O2')
+
+
+def gen_opt(ctx):
+    """--gen-opt, else TOTK_GEN_OPT (O1 or O2, case and a leading '-' aside), else '' for build_game.py's default. An
+    unknown value is logged once and ignored."""
+    if not hasattr(ctx, 'gen_opt'):
+        wanted = getattr(ctx.options, 'gen_opt', None) or os.environ.get('TOTK_GEN_OPT', '').strip()
+        opt = wanted.lstrip('-').upper()
+        if wanted and opt not in GEN_OPTS:
+            ctx.reporter.log(f'compile: TOTK_GEN_OPT={wanted} is not {" or ".join(GEN_OPTS)}; the default level '
+                             'is used')
+            opt = ''
+        ctx.gen_opt = opt
+    return ctx.gen_opt
+
+
 def runtime_key(ctx):
     """Fingerprint of what totk.exe is built from besides the lifted code: the runtime, the toolchain and the build
     tools. Shader preparation depends on these, not on the code cheats a lift adds."""
@@ -1082,8 +1101,10 @@ class Compile(Step):
     id = 'compile'
 
     def key(self, ctx):
+        # A level asked for joins the key only then, so installs at the default keep their key.
+        opt = gen_opt(ctx)
         return fingerprint('compile-3', ctx.keys['lift'], runtime_key(ctx),
-                           ctx.layout.pgo(game_version(ctx)) or 'no profile')
+                           ctx.layout.pgo(game_version(ctx)) or 'no profile', *([f'gen-opt {opt}'] if opt else []))
 
     def current(self, ctx, record):
         exe = ctx.dest / ('totk' + EXE)
@@ -1110,11 +1131,14 @@ class Compile(Step):
         cpu = getattr(ctx, 'cpu', DEFAULT_CPU)
         lib = layout.runtime_lib_for(cpu)
         pgo = layout.pgo(game_version(ctx))
+        opt = gen_opt(ctx)
+        if opt:
+            rep.log(f'compile: generated C at -{opt}, as asked' + (' (the profile compiles it at -O2)' if pgo else ''))
         code, log = run_tool(ctx, 'compile', layout.tools / 'build_game.py', [
             '--gen', ctx.temp / 'gen', '--out', build, '--toolchain', layout.llvm, '--cpu', cpu,
             *(['--deps', layout.deps] if layout.deps else []), *(['--sysroot', layout.sysroot] if layout.sysroot else []),
             '--runtime', layout.runtime, *(['--runtime-lib', lib] if lib else ()), *(['--pgo', pgo] if pgo else ()),
-            '--ninja', layout.ninja,
+            *(['--gen-opt', opt] if opt else ()), '--ninja', layout.ninja,
             '--version', version_tag(game_version(ctx)), '--expected', layout.expected(game_version(ctx)),
             '--exefs', dest / 'exefs', '--romfs', dest / 'romfs',
             '--profile', profile_dir(ctx)], parse)
@@ -1128,7 +1152,7 @@ class Compile(Step):
         replace_file(build / 'romfs-index.bin', dest / 'romfs-index.bin')
         for dll in layout.dlls:
             replace_file(dll, dest / dll.name)
-        return {'exe_sha256': file_sha256(dest / exe.name), 'cpu': cpu}
+        return {'exe_sha256': file_sha256(dest / exe.name), 'cpu': cpu, **({'gen_opt': opt} if opt else {})}
 
 
 # ---- 6. prepare

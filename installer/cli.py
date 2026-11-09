@@ -1,5 +1,5 @@
 """Command line: python -m installer --base FILE --update FILE --keys FILE --lang CODE --dest DIR [--firmware DIR]
-                                     [--root DIR] [--temp DIR] [--verify] [--dlss] [--cpu LEVEL]
+                                     [--root DIR] [--temp DIR] [--verify] [--dlss] [--cpu LEVEL] [--gen-opt O1|O2]
               python -m installer ... --games DIR [--add-to-steam]   (in place of --dest)
 
 A first install needs every option. --firmware names the Switch firmware folder (an unpacked firmware or an emulator's
@@ -15,6 +15,10 @@ Windows with an NVIDIA RTX GPU (steps.py, Dlss).
 --cpu (or the TOTK_CPU environment variable, which the window passes on) builds for that code level instead of the
 one the host check picks: v3 or v2 on x86-64, a64 or oryon on aarch64 (tools/build_game.py CPU_LEVELS). The check stops
 on a level this CPU cannot run (steps.py, Check.cpu_level).
+
+--gen-opt O1|O2 (or TOTK_GEN_OPT) compiles the generated C at that optimisation level instead of the default: -O2 on
+aarch64, -O1 on x86-64 (tools/build_game.py GEN_OPT_DEFAULT). Changing it recompiles the game; a release's execution
+profile compiles at -O2.
 
 --games DIR (the Linux window's default, installer/games.py) names a games folder instead of an install folder: the
 install goes into <games>/<version tag>, v121 or v143, and the saves into <games>/profile, shared by every version
@@ -148,6 +152,9 @@ def main(argv=None):
                                                       'to the game, for dlaa and the DLSS modes')
     ap.add_argument('--cpu', help='code level to build for instead of the one the host check picks: v3 or v2 on '
                                   'x86-64, a64 or oryon on aarch64 (TOTK_CPU does the same)')
+    ap.add_argument('--gen-opt', choices=('O1', 'O2'),
+                    help='optimisation level of the generated C instead of the default (O2 on aarch64, O1 on x86-64): '
+                         'O2 optimises more and compiles longer (TOTK_GEN_OPT does the same)')
     args = ap.parse_args(argv)
     if bool(args.dest) == bool(args.games):
         ap.error('one of --dest and --games is required')

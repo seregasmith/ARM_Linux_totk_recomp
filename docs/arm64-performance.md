@@ -212,10 +212,11 @@ Most likely first. "Shows as" is what the session profiler's report and the log 
    time. The main thread waits for the p44 workers (`0x1037`, `0x1038`), and for a host call
    (`exe+0xc649360`, 15-20%).
    - Shows as: the sched lines' "render wait" on the main thread and "main wait" entries.
-   - The lifted code's speed is part of this: `-O1` (`tools/build_game.py` `GEN_FLAGS`; the oryon code level, no PGO
-     on aarch64), six register locals (`recomp/regs.py` `LOCALS`) and the portable FP/SIMD lowering
-     (`runtime/simd.h`). The fixes are those of Phase 4: a NEON backend of `simd.h`, more register locals, `-O2` and a
-     profile.
+   - The lifted code's speed is part of this: `-O1` until 2026-11-09, `-O2` since (`tools/build_game.py`
+     `GEN_OPT_DEFAULT`; the oryon code level, no PGO on aarch64), six register locals (`recomp/regs.py` `LOCALS`) and the portable FP/SIMD lowering
+     (`runtime/simd.h`). The fixes are those of Phase 4: a NEON backend of `simd.h`, more register locals, `-O2` and
+     a profile. Since the 2026-11-09 defaults this suspect holds the frame; the plan is in
+     [arm64-guest-code.md](arm64-guest-code.md).
 4. **Pipeline builds in new areas.** They add 13-49% of the render thread's time for a minute after arriving
    somewhere new. The pipeline cache keeps them for the next visit.
 5. **Where the critical threads run.** `TOTK_ONE_PER_CORE` (`runtime/perf.c` `cpu_placement`) is for SMT and does

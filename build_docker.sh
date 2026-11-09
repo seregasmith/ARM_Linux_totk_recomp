@@ -44,6 +44,8 @@
 #                   tools/extract.py from its code
 #   TOTK_CPU        code level: aarch64 a64 (default; Armv8.2 + LSE, RCpc, dot product) or oryon (Snapdragon 8
 #                   Elite); x86_64 v3 (default) or v2. tools/build_game.py CPU_LEVELS
+#   TOTK_GEN_OPT    O1 or O2: the generated C's optimisation level (default O2 on aarch64, O1 on x86_64;
+#                   tools/build_game.py GEN_OPT_DEFAULT)
 #   TOTK_OUT        where the portable folder, totk-<version>, and the setup AppImage go (default:
 #                   build/install-<arch> in the source tree, which git ignores)
 #   TOTK_ROMFS      0: leave the 16 GB RomFS image out of the portable folder (copy it yourself)
@@ -498,8 +500,9 @@ in_shell "RomFS patches (game, Xbox prompts both layouts)" \
     "py314 tools/make_romfs_patches.py --version $v &&
      py314 tools/make_romfs_patches.py --version $v --prompts xbox &&
      py314 tools/make_romfs_patches.py --version $v --prompts xbox-label"
-in_shell "compile and link (build/$v/totk, $TOTK_ARCH ${TOTK_CPU:-default level})" \
-    "py tools/build_game.py --version $v --arch $TOTK_ARCH ${TOTK_CPU:+--cpu $TOTK_CPU} --toolchain \$TOTK_LLVM \
+in_shell "compile and link (build/$v/totk, $TOTK_ARCH ${TOTK_CPU:-default level}, ${TOTK_GEN_OPT:-default optimisation})" \
+    "py tools/build_game.py --version $v --arch $TOTK_ARCH ${TOTK_CPU:+--cpu $TOTK_CPU} \
+         ${TOTK_GEN_OPT:+--gen-opt $TOTK_GEN_OPT} --toolchain \$TOTK_LLVM \
          --sysroot $sysroot --deps $deps --config /tmp/config.docker.toml --jobs $TOTK_JOBS"
 in_shell "the self-test (layout, dispatch table, host functions)" \
     "cp -L $deps/lib/libSDL3.so.0 build/$v/ && $run_target build/$v/totk --selftest"
@@ -521,6 +524,7 @@ docker run --rm ${tty_flags[@]+"${tty_flags[@]}"} \
     -v "$NIX_VOLUME":/nix -v "$SRC":/src $(work_mounts) -v "$LOGS":/logs \
     ${game_flags[@]+"${game_flags[@]}"} \
     -e TOTK_ARCH="$ARCH" -e TOTK_VERSION="$VERSION" -e TOTK_CPU="${TOTK_CPU:-}" -e TOTK_ROMFS="${TOTK_ROMFS:-1}" \
+    -e TOTK_GEN_OPT="${TOTK_GEN_OPT:-}" \
     -e TOTK_OWNER="$OWNER" -e TOTK_JOBS="$JOBS" -e GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
     -e SDL_VIDEO_DRIVER=dummy -e SDL_AUDIO_DRIVER=dummy \
     "$IMAGE" bash -c "$INNER" inner "$MODE"

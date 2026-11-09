@@ -244,6 +244,10 @@ built on an aarch64 machine, since NativeAOT builds the translator for the machi
 - **Choosing a level.** The window's code level box (Automatic, then the architecture's levels), `--cpu` in the
   command-line setup, or `TOTK_CPU=a64` or `oryon` when starting the AppImage (the box starts at it) builds that level
   instead; the check stops on a level this CPU cannot run. The x86-64 setup takes `v3` or `v2` the same way.
+- **Optimisation level.** The aarch64 setup compiles the game at `-O2` (the x86-64 one at `-O1`).
+  `TOTK_GEN_OPT=O1` when starting the AppImage, or `--gen-opt O1` in the command-line setup, compiles it at `-O1`
+  instead. A level asked for recompiles the game even when nothing else changed, and the setup's log records it
+  (`compile: generated C at -O1, as asked`). Starting the AppImage without it goes back to the default level.
 - **The device.** The window is Tk on X11 (XWayland under a Wayland session) and is used by touch; the command-line
   setup is `./TotK-Setup-aarch64.AppImage --cli --base ... --update ... --keys ... --lang ... --games ...`. Without
   `/dev/fuse` the AppImage starts with `--appimage-extract-and-run`.

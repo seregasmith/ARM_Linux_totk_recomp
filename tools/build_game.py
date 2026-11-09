@@ -39,6 +39,9 @@ objects Ninja just rebuilt (new mtime). A mismatch deletes the object, Ninja rec
 summary line. A fork checks the hardlinked generated objects against build/<version>/obj/objects.sha256 (read-only; a
 bad shared object stops the fork and asks for a main build run, which recompiles it and breaks the shared inode).
 
+--gen-opt O1|O2 sets the optimisation level of the generated C (GEN_OPT_DEFAULT per architecture: -O1 on x86-64,
+-O2 on aarch64); --pgo always compiles it at -O2.
+
 Compile jobs share a memory budget (MEM_BUDGET, default the smaller of 50 GiB and 80% of RAM) at JOB_MEM per job, so a
 big machine does not run out of memory on the largest chunks. Each phase reports its wall time and the peak memory
 of its processes (Windows job object accounting: committed private bytes).
@@ -122,6 +125,19 @@ DEFAULT_CPU = {'x86_64': 'v3', 'aarch64': 'a64'}
 ARCH_FLAGS = {'x86_64': [], 'aarch64': ['-fsigned-char']}
 RT_ARCH_FLAGS = {'x86_64': [], 'aarch64': ['-fms-volatile']}
 GEN_ARCH_FLAGS = {'x86_64': [], 'aarch64': ['-ffixed-x18', '-mbranch-protection=none']}
+# Optimisation levels of the generated C (--gen-opt); GEN_OPT is the one GEN_FLAGS holds. x86-64 keeps LAS Recomp's
+# -O1, where only the PGO builds use -O2. aarch64 compiles at -O2: on the Odin 3 the game code took about 5% less CPU
+# time per frame at equal clocks (docs/arm64-guest-code.md, step 1.2). --pgo compiles at -O2 regardless.
+GEN_OPTS = ('O1', 'O2')
+GEN_OPT_DEFAULT = {'x86_64': 'O1', 'aarch64': 'O2'}
+GEN_OPT = 'O1'
+
+
+def set_gen_opt(opt):
+    """Compile the generated C at -<opt> (GEN_OPTS)."""
+    global GEN_OPT
+    GEN_FLAGS[GEN_FLAGS.index(f'-{GEN_OPT}')] = f'-{opt}'
+    GEN_OPT = opt
 
 
 def set_target(arch, cpu):
@@ -148,7 +164,7 @@ def set_pgo(pgo, out):
     out/pgo/default_<id>.profraw every minute and at exit (runtime/platform win32.c), across runs. --pgo FILE: compile
     with that merged profile (tools/pgo.py merge). Functions the profile never saw run are optimised for size."""
     global PGO_INPUT
-    GEN_FLAGS[GEN_FLAGS.index('-O1')] = '-O2'
+    set_gen_opt('O2')
     if pgo == 'gen':
         # absolute: the instrumented exe resolves the directory against its own working directory
         flags = [f'-fprofile-generate={cmd_arg((out / "pgo").resolve().as_posix())}']
@@ -223,7 +239,8 @@ DISPLAY_VERSIONS = {'v0': '1.0.0', 'v110': '1.1.0', 'v112': '1.1.2', 'v121': '1.
 
 GiB = 1 << 30
 # Peak commit of one compile, 1.2.1 at -O1 (2026-10-20): 120-180 MiB per ~3 MiB chunk, 568 MiB for main_table.c
-# (295k-entry tables). 768 MiB leaves headroom for the largest file.
+# (295k-entry tables). 768 MiB leaves headroom for the largest file. -O2 (--gen-opt O2, --pgo) keeps it: the Windows
+# setup's PGO builds compile at -O2 within it, and the compile phase prints its peak per process.
 JOB_MEM = 768 << 20
 MEM_BUDGET = 50 * GiB  # total for all compile jobs
 
@@ -854,6 +871,10 @@ def main():
                     help=f'build only <out>/{LIB_NAME} from runtime/ (no generated C, no totk.exe)')
     ap.add_argument('--runtime-lib', type=Path, help=f'link against this {LIB_NAME} instead of compiling runtime/ '
                                                     f'({", ".join(sorted(INSTALL_SIDE))} and modules.c still compile)')
+    ap.add_argument('--gen-opt', choices=GEN_OPTS,
+                    help='optimisation level of the generated C (default: ' +
+                         ', '.join(f'{a} {o}' for a, o in GEN_OPT_DEFAULT.items()) +
+                         '); O2 optimises more and takes longer to compile. --pgo compiles at O2')
     ap.add_argument('--pgo', metavar='gen|FILE',
                     help='profile-guided optimisation, generated code at -O2: gen builds an instrumented totk.exe '
                          '(needs --toolchain on Windows: MSYS2 clang ships no profile runtime); FILE builds with that '
@@ -866,6 +887,9 @@ def main():
     if WIN and args.arch != 'x86_64':
         sys.exit('build_game: Windows builds are x86_64 only')
     set_target(args.arch, args.cpu)
+    set_gen_opt(args.gen_opt or GEN_OPT_DEFAULT[args.arch])
+    if args.pgo and args.gen_opt == 'O1':
+        print('build_game: --pgo compiles the generated C at -O2; --gen-opt O1 does not apply', file=sys.stderr)
 
     gen = (args.gen or ROOT / 'generated' / args.version).resolve()
     out = (args.out or ROOT / 'build' / args.version).resolve()
@@ -995,7 +1019,8 @@ def main():
         env['PATH'] = str(TOOLCHAIN_BIN or UCRT) + os.pathsep + os.environ.get('PATH', '')
     base = [str(NINJA), '-f', str(out / 'build.ninja'), '-j', str(jobs)]
     nfiles = sum(len(v) for v in mods.values())
-    print(f'build_game: {nfiles} generated files in {len(linked)} modules ({", ".join(linked)}), {jobs} jobs', flush=True)
+    print(f'build_game: {nfiles} generated files in {len(linked)} modules ({", ".join(linked)}), {jobs} jobs, '
+          f'generated C at -{GEN_OPT}', flush=True)
 
     code, dt, peak_one, peak_all = run_measured(base + ['objects'], env)
     print(f'compile: {dt:.1f} s, peak {mib(peak_one)} per process' + (f', {mib(peak_all)} all processes' if WIN else ''))

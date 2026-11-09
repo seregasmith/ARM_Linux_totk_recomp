@@ -776,6 +776,40 @@ class CpuLevelTest(unittest.TestCase):
         self.assertEqual(layout.runtime_lib_for(other), Path(f'rt/libtotkrt-{other}.a'))
 
 
+class GenOptTest(unittest.TestCase):
+    """The generated C's optimisation level: --gen-opt, else TOTK_GEN_OPT, else build_game.py's default (steps.py
+    gen_opt); the compile step's key changes only when a level is asked for."""
+
+    def ctx(self, gen_opt=None):
+        ctx = SimpleNamespace(options=SimpleNamespace(gen_opt=gen_opt), reporter=Reporter(out=io.StringIO()),
+                              keys={'lift': 'lift key'}, layout=SimpleNamespace(pgo=lambda version: None))
+        self.addCleanup(ctx.reporter.close)
+        return ctx
+
+    def opt(self, gen_opt=None, env=''):
+        with mock.patch.dict(steps.os.environ, {'TOTK_GEN_OPT': env}):
+            return steps.gen_opt(self.ctx(gen_opt))
+
+    def test_levels(self):
+        self.assertEqual(self.opt(), '')
+        self.assertEqual(self.opt(env='O2'), 'O2')
+        self.assertEqual(self.opt(env='-o2'), 'O2')
+        self.assertEqual(self.opt(gen_opt='O1', env='O2'), 'O1')   # --gen-opt wins over TOTK_GEN_OPT
+        self.assertEqual(self.opt(env='O3'), '')                   # unknown: the default
+
+    def test_key_changes_only_when_asked(self):
+        def key(env):
+            with mock.patch.dict(steps.os.environ, {'TOTK_GEN_OPT': env}), \
+                    mock.patch.object(steps, 'runtime_key', return_value='runtime key'), \
+                    mock.patch.object(steps, 'game_version', return_value='1.4.3'):
+                return steps.Compile().key(self.ctx())
+
+        default = steps.fingerprint('compile-3', 'lift key', 'runtime key', 'no profile')
+        self.assertEqual(key(''), default)   # installs at the default keep their key
+        self.assertNotEqual(key('O2'), default)
+        self.assertNotEqual(key('O2'), key('O1'))
+
+
 class GamesFolderTest(unittest.TestCase):
     """The Linux setup's games folder (installer/games.py): one install per update, shared saves, Steam."""
 

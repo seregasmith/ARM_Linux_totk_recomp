@@ -162,6 +162,14 @@ your machines without MSYS2, Python or .NET. `romfs.bin` stays out unless you pa
 `romfs\` next to the exe or point `TOTK_ROMFS` at its folder. Run `totk.exe --prepare-shaders` once in the copied
 folder. The folder holds code and data derived from your game: for your own machines only.
 
+### Optimisation level
+
+`build_game.py --gen-opt O1|O2` sets the optimisation level of the generated C. The default (`GEN_OPT_DEFAULT`) is
+`-O1` on x86-64 and `-O2` on aarch64, where the game code took about 5% less CPU time per frame on the Odin 3
+([arm64-guest-code.md](arm64-guest-code.md), step 1.2). `-O2` takes longer to compile; the compile phase prints the
+peak memory of a process. The setup takes `--gen-opt` or `TOTK_GEN_OPT`, and `build_docker.sh` takes `TOTK_GEN_OPT`. A
+profile-guided build always compiles at `-O2`.
+
 ### Profile-guided build
 
 `build_game.py --pgo <file>.profdata` compiles the generated code at -O2 with an execution profile, and the runtime

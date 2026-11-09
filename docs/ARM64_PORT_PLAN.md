@@ -232,6 +232,7 @@ Supported hosts:
 | `TOTK_OUT` | Where the portable folder goes. Default: `build/install-<arch>-<ver>/`, which git ignores; the folder holds game-derived files. |
 | `TOTK_ROMFS` | `0`: leave the 16 GB RomFS image out of the folder. |
 | `TOTK_CPU` | Code level: aarch64 `a64` (default) or `oryon`; x86_64 `v3` (default) or `v2`. |
+| `TOTK_GEN_OPT` | Optimisation level of the generated C: `O2` (the aarch64 default) or `O1` (the x86_64 default). |
 | `TOTK_NIX_VOLUME` | An existing Nix store volume to share. bbport's `bbport-nix` works when both scripts pin the same nixpkgs (below); clang, Python and .NET are then downloaded once. |
 | `JOBS` | Compiler processes. Default: Docker's RAM divided by 2 GB, capped at its CPU count, as in bbport. |
 | `GITHUB_TOKEN` | Optional. Raises Nix's GitHub API rate limit. |
@@ -454,7 +455,8 @@ shows no validation errors with the layers on.
 
 ## Phase 4: performance on ARM
 
-Measure first: `TOTK_CORE_DIAG`, the F10 overlay, and perf or simpleperf on the device. bbport's
+Measure first: `TOTK_CORE_DIAG`, the F10 overlay, and perf or simpleperf on the device. The FP/SIMD, register-local
+and code-level items below are planned step by step in [arm64-guest-code.md](arm64-guest-code.md). bbport's
 `odin_profile_remote.sh` is a template for collecting the data. The setup's Steam entry profiles a whole session
 with `TOTK_SYSMON=1` (`tools/sysmon_launch.sh`, `tools/odin_sysmon.sh`, `tools/sysmon_report.py`);
 [arm64-performance.md](arm64-performance.md) holds the measurements on the Odin 3 and the suspects still to check. Then
