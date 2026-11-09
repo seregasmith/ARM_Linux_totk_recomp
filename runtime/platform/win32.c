@@ -97,6 +97,12 @@ int plat_cpu_cores(uint64_t *all, uint64_t *first) {
 
 int plat_process_affinity(uint64_t mask) { return SetProcessAffinityMask(GetCurrentProcess(), (DWORD_PTR)mask) != 0; }
 
+// Not read on Windows: TOTK_PIN_RENDER (perf.c perf_pin_frame) pins nothing there.
+uint64_t plat_cpu_fastest(uint64_t among) {
+    (void)among;
+    return 0;
+}
+
 uint64_t plat_thread_cpu_ns(uint32_t tid) {
     HANDLE th = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid);
     FILETIME a, b, k, u;

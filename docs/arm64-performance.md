@@ -1,6 +1,7 @@
 # ARM64 performance: what holds the frame on the handheld
 
-Status: written 2026-11-05, updated 2026-11-09 after the write-tracking tests. Everything under "Suspects" is a hypothesis
+Status: written 2026-11-05, updated 2026-11-09 after the write-tracking and placement tests and the new ARM64 Linux
+defaults. Everything under "Suspects" is a hypothesis
 drawn from the code, the bring-up log and that capture. Replace each one with what the session profiler (below) shows,
 and move the ones it rules out to "Ruled out" with the reason.
 
@@ -197,8 +198,8 @@ Most likely first. "Shows as" is what the session profiler's report and the log 
    - Shows as: the log's `mem: shadow ... MiB copied in` and `texture re-uploads` per frame; the render thread's
      `texture` share.
    - Fix, in the game: a finer unit than 2 MiB, or page tracking by write faults (`mprotect` and the ESR path of
-     Phase 2; Phase 3 step 6 of `docs/ARM64_PORT_PLAN.md`). `TOTK_WW_REGION_KB` (64 to 2048, default 2048) tries the
-     first: a write fault thaws only its block of the region, and the region counts as written in those blocks
+     Phase 2; Phase 3 step 6 of `docs/ARM64_PORT_PLAN.md`). `TOTK_WW_REGION_KB` (64 to 2048; default 256 on ARM64 Linux,
+     2048 elsewhere) does the first: a write fault thaws only its block of the region, and the region counts as written in those blocks
      (`runtime/memory.c` `thaw_block_locked`, `region_written`). Smaller blocks report less, but each block's first
      write after a freeze costs a fault. Skipping the re-upload of a texture whose content did not
      change is a second line of defence. A kernel built with `CONFIG_USERFAULTFD` and `CONFIG_PTE_MARKER_UFFD_WP`
@@ -217,11 +218,12 @@ Most likely first. "Shows as" is what the session profiler's report and the log 
      profile.
 4. **Pipeline builds in new areas.** They add 13-49% of the render thread's time for a minute after arriving
    somewhere new. The pipeline cache keeps them for the next visit.
-5. **Where the critical threads run.** Nothing pins threads on aarch64. `TOTK_ONE_PER_CORE` (`runtime/perf.c`
-   `cpu_placement`) is for SMT and does nothing here. The render thread already ran on the prime cores 93% of the
-   time in the third capture.
-   - Fix if needed: the game places them itself (`plat_thread_affinity`, `runtime/platform/linux.c`), the "Cores"
-     item of Phase 4 (`docs/ARM64_PORT_PLAN.md`). No system setting changes.
+5. **Where the critical threads run.** `TOTK_ONE_PER_CORE` (`runtime/perf.c` `cpu_placement`) is for SMT and does
+   nothing here. The render thread ran on the prime cores 93% of the time in the third capture. In the same-path pair
+   it was 95% without the recorder and 51% with it ("Open" below).
+   - Test: `TOTK_PIN_RENDER` (`runtime/perf.c` `perf_pin_frame`), "Tests for suspect 5" below. The game restricts
+     its own threads (`plat_thread_affinity`), only while it runs. No system setting changes. This is the first step
+     of the "Cores" item of Phase 4 (`docs/ARM64_PORT_PLAN.md`).
 6. **The GPU's own time.** Look here once the GPU is busy 90% or more; it was 54-62% in the slow stretches. Turnip
    chooses GMEM (tiled) or sysmem rendering per render pass, and a pass split by a barrier or a copy stores and
    reloads its tiles. Mesa's u_trace (`MESA_GPU_TRACES`, `MESA_GPU_TRACEFILE`; see Mesa's `docs/envvars.rst`) times
@@ -238,13 +240,96 @@ Launches at the far view, each with `TOTK_SYSMON=1`. Compare the reports' `shado
    written.
 3. `TOTK_WW_REGION_KB=256`, then `64`: blocks of 256 or 64 KiB in place of the 2 MiB region. More write faults
    (`thaws by a write` in the log's `mem: write-watch` lines) are the cost to watch.
-4. `TOTK_WW_COOL_MS=128`, then `32` (default 1024): the longest a region found written stays thawed. While thawed it
+4. `TOTK_WW_COOL_MS=128`, then `32` (1024 at the time, now 256 on ARM64 Linux): the longest a region found written stays thawed. While thawed it
    counts as written at every query (239 of the 354 regions reported a frame in the third capture were in that
    cooldown), so a shorter cap reports less, and a region the game writes every frame takes a write fault and a
    protection change more often. Also together with `TOTK_WW_REGION_KB=256`.
 
    The idle freeze of test 2 does little under region tracking: a thawed region reports all its pages at every query,
    so it never looks idle, and region_written refreezes it after its cooldown instead.
+
+### Tests for suspect 5
+
+`TOTK_PIN_RENDER` keeps the thread that replays on the fastest cores: those with the largest `cpu_capacity`, 6-7 on
+the Odin 3. That thread is `g1004 p30`, or the replay thread with `TOTK_REPLAY_ASYNC=1`.
+
+| Value | Pinned |
+|---|---|
+| `0` | nothing |
+| unset | `2` on ARM64 Linux when at least two cores are the fastest, else nothing ("Defaults on ARM64 Linux") |
+| `1` | the thread that replays |
+| `2` | that thread and the recorder thread (same as `1` with `TOTK_VK_RECORDER=0`) |
+| `ab` | `1` in the B blocks of `TOTK_AB`, nothing in the A blocks |
+
+The log names the cores: `cpu: TOTK_PIN_RENDER=1: the thread that replays on processors 6-7, the fastest of 8`.
+
+Launches back to back on the route of the same-path pair, each with `TOTK_SYSMON=1`, `TOTK_WW_REGION_KB=256` and
+`TOTK_WW_COOL_MS=256`:
+
+1. `TOTK_VK_RECORDER=0`: the faster run of the pair, the reference.
+2. `TOTK_VK_RECORDER=1 TOTK_PIN_RENDER=1`.
+3. `TOTK_VK_RECORDER=1 TOTK_PIN_RENDER=2`.
+4. `TOTK_VK_RECORDER=0 TOTK_PIN_RENDER=1`.
+
+In the report, `g1004 p30` should be `on prime` nearly 100% of the time. Its `waitCPU%` is the cost: the time it was
+ready while other threads held both prime cores. `ab` (with `TOTK_AB=20`) is for a static scene only, standing still.
+
+**Results (2026-11-09).** The four launches, one session each, in this order. "World 20-50 s" averages the log's
+frame windows by the game's world clock, where the runs follow the same route.
+
+| Run | Slowest 20 s | World 20-50 s | Replay, slowest 20 s | `g1004 p30` on prime, MHz | `vk recorder` on prime, MHz |
+|---|---|---|---|---|---|
+| `VK_RECORDER=0` | 37.9 fps (26.4 ms) | 42.1 fps | 16.8 ms | 92%, 3007 | none |
+| `VK_RECORDER=1 PIN_RENDER=1` | 39.1 fps (25.6 ms) | 40.7 fps | 13.0 ms | 100%, 3000 | 26%, 2758 |
+| `VK_RECORDER=1 PIN_RENDER=2` | 39.7 fps (25.2 ms) | 42.6 fps | 12.9 ms | 100%, 3057 | 100%, 3057 |
+| `VK_RECORDER=0 PIN_RENDER=2` (same as `1`) | 38.1 fps (26.3 ms) | 39.7 fps | 17.3 ms | 100%, 3038 | none |
+
+- **The pin holds.** The thread that replays stayed on cores 6-7, and it waited for a CPU 1% of the time, as before.
+  The pinned recorder waited 4%.
+- **Without the recorder it changes nothing.** The render thread was already on the prime cores 92-95% of the time.
+- **With the recorder it turns the loss of the same-path pair into a gain.** The recorder takes 2-4 ms of the replay
+  off the render thread (`g1004 p30` busy 53-54% of a core against 65-67%). `VK_RECORDER=1 PIN_RENDER=2` was the
+  fastest by both measures and over the whole capture (45.9 fps against 44.5-45.2), 1.8 fps over `VK_RECORDER=0` in
+  the slowest 20 s. The second session below confirmed it.
+- **Slow frames.** Every run had the same 4-5 at arrival. The 50-53 ms frames of the pinned runs came in their last
+  seconds, while leaving; the first run ended on a different view (17-20 ms frames there).
+- **What is left.** The GPU still waits 6.6 ms a frame for the next submission. The replay (12.9 ms) still holds the
+  shadow copies (4.3 ms, 60 MiB) and the texture re-uploads.
+
+### Defaults on ARM64 Linux (2026-11-09)
+
+A second session on the same route, in this order, the last run with the old write tracking defaults:
+
+| Run | Slowest 20 s | World 20-45 s | Replay, slowest 20 s | Shadow copies, slowest 20 s |
+|---|---|---|---|---|
+| 256 / 256, `VK_RECORDER=0 PIN_RENDER=1` | 38.1 fps (26.2 ms) | 41.7 fps | 16.8 ms | 4.6 ms, 67 MiB |
+| 256 / 256, `VK_RECORDER=1 PIN_RENDER=2` | 39.4 fps (25.4 ms) | 43.8 fps | 12.9 ms | 4.2 ms, 59 MiB |
+| 256 / 256, `VK_RECORDER=0 PIN_RENDER=0` | 38.0 fps (26.3 ms) | 40.7 fps | 17.3 ms | 4.7 ms, 68 MiB |
+| 2048 / 1024, `VK_RECORDER=0 PIN_RENDER=0` | 31.9 fps (31.3 ms) | 32.2 fps | 21.9 ms | 8.1 ms, 126 MiB |
+
+"256 / 256" is `TOTK_WW_REGION_KB=256 TOTK_WW_COOL_MS=256`; "2048 / 1024" were the defaults.
+
+- **Write tracking.** 256 / 256 against the old defaults: +6.1 fps in the slowest 20 s, +8.5 in world 20-45 s, half
+  the shadow copies. The last run was also the hottest (the prime cores' cooling device was active), but the copies
+  and the replay time show the work itself shrank.
+- **Placement.** The recorder pinned with the render thread against the recorder off and nothing pinned, in two
+  sessions: +1.8 and +1.4 fps in the slowest 20 s, +2.5 and +3.1 fps in world 20-45 s (41.1 against 43.6 in the
+  first). Pinning without the recorder changed nothing in either session.
+- **Slow frames.** 20-22 in each 256 / 256 run, most of them at arrival; 38 with the old defaults, with a stretch of
+  50-54 ms frames in play.
+
+So on ARM64 Linux (`#if defined(__aarch64__) && defined(__linux__)`):
+
+- `TOTK_WW_REGION_KB` defaults to 256 and `TOTK_WW_COOL_MS` to 256 (`runtime/memory.c` `WW_REGION_KB`,
+  `RW_COOL_MAX_MS`). They only act with region write tracking, on a kernel without userfaultfd. The log line that
+  turns it on gives the values in use.
+- `TOTK_PIN_RENDER` defaults to 2 (`runtime/perf.c` `PIN_RENDER_DEFAULT`), when at least two cores are the fastest:
+  with one, the thread that replays would share it with everything else. The log says `(default)`.
+- The recorder stays on, its default on Turnip.
+
+Elsewhere the defaults stay as they were: 2048, 1024 and 0. An x86 Linux kernel without userfaultfd also tracks per
+region, and the x86 harness favoured small blocks there too, but no run in play measured it. Setting any of the three
+still overrides the default, so the old behaviour is `TOTK_WW_REGION_KB=2048 TOTK_WW_COOL_MS=1024 TOTK_PIN_RENDER=0`.
 
 ### Ruled out
 
@@ -261,8 +346,17 @@ Launches at the far view, each with `TOTK_SYSMON=1`. Compare the reports' `shado
 ### Open
 
 - **The recorder thread** (`TOTK_VK_RECORDER`, on by default on Turnip). One A/B cycle in the third capture was
-  inconclusive. In the write tracking tests, off was 2-4 fps faster in both pairs. A back-to-back pair with the device
-  cool would make it the default on Turnip.
+  inconclusive. In the write tracking tests, off was 2-4 fps faster in both pairs.
+  - **The same-path pair (2026-11-09).** Two sessions at 256 / 256, back to back, the same route and actions, with no
+    cooling device active but the fan. Off was faster:
+    - by 1.9 fps over the first 25 s of world time, where the runs line up (they drift apart after that);
+    - by 1.4 fps in the slowest 20 s (25.8 against 26.7 ms).
+  - **Why.** The difference is where the render thread runs. With the recorder, `g1004 p30` was on the prime cores 51%
+    of the time at 2855 MHz on average. Without it, 95% at 3049 MHz. The recorder's own hand-offs cost little: its
+    drains waited 593 ms in the 74 s session, about 0.2 ms a frame. With the recorder the replay was 0.9 ms shorter.
+  - **With the render thread pinned** (`TOTK_PIN_RENDER=2`, "Tests for suspect 5" above) the recorder was the faster
+    of the two in two sessions: 39.7 and 39.4 against 37.9 and 38.0 fps in the slowest 20 s. Recorder on and pinned is
+    the default on ARM64 Linux now ("Defaults on ARM64 Linux").
 
 ## Profiling a session from Steam's gaming mode
 

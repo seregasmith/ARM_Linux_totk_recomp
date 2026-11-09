@@ -86,9 +86,19 @@ static uint32_t rw_until[RT_ADDRESS_LIMIT >> FRZ_SHIFT];
 static volatile int64_t frz_count[4];   // freezes; thaws by a write fault, by mem_thaw, by a mapping change
 // Blocks (TOTK_WW_REGION_KB, 64 KiB to 2 MiB; read once by mem_init): a write fault thaws only the block of its region
 // it hit, so a region the game wrote counts as written in those blocks (region_written), not whole. The other blocks
-// stay read-only and fault on their own first write. The default, one block of 2 MiB, is the region itself.
+// stay read-only and fault on their own first write. One block of 2 MiB is the region itself.
+// The defaults of TOTK_WW_REGION_KB and TOTK_WW_COOL_MS. ARM64 Linux: 256 KiB blocks and 256 ms, the best of the
+// Odin 3's runs (docs/arm64-performance.md, "Defaults on ARM64 Linux"): shadow copies of 126 MiB a frame fell to 68 and
+// the slowest 20 s went from 31.9 to 38.0 fps. Elsewhere, unmeasured in play: the 2 MiB region and 1024 ms.
+#if defined(__aarch64__) && defined(__linux__)
+#define WW_REGION_KB 256
+#define RW_COOL_MAX_MS 256u
+#else
+#define WW_REGION_KB 2048
+#define RW_COOL_MAX_MS 1024u
+#endif
 #define BLK_MIN_SHIFT 16
-static unsigned blk_shift = FRZ_SHIFT;   // log2 of the block size
+static unsigned blk_shift = FRZ_SHIFT;   // log2 of the block size (region_watch_init)
 static unsigned blk_n = 1;               // blocks per region, at most 32
 static uint32_t blk_all = 1;             // the mask of every block of a region
 // frz_lock: the blocks of each region that are read-only, all of them while frz says frozen. A region partly read-only
@@ -99,7 +109,6 @@ static uint64_t frz_run[16 << (FRZ_SHIFT - BLK_MIN_SHIFT)][2];   // frz_lock: fr
 // The cooldown of a region found written after a freeze (region_written): RW_COOL_MS doubling up to RW_COOL_MAX_MS, or
 // to TOTK_WW_COOL_MS (mem_init).
 #define RW_COOL_MS 16u
-#define RW_COOL_MAX_MS 1024u
 static unsigned rw_cool_first = RW_COOL_MS, rw_cool_max = RW_COOL_MAX_MS;
 
 static int watched(uint64_t addr, uint64_t size) {
@@ -271,10 +280,11 @@ static void reexec_or_fail(const char *what) {
 }
 
 // The settings of region write tracking (region_written), read once.
-// TOTK_WW_REGION_KB: the block size of write tracking, in KiB; a power of two from 64 to 2048 (2048, the region, is
-// the default). Other values are rounded up to the next power of two in that range.
-// TOTK_WW_COOL_MS: the longest cooldown of a region found written, 0 to 60000 ms (default 1024); the first one is
-// 16 ms, or the cap when that is shorter.
+// TOTK_WW_REGION_KB: the block size of write tracking, in KiB; a power of two from 64 to 2048 (WW_REGION_KB by
+// default; 2048 is the region). Other values are rounded up to the next power of two in that range.
+// TOTK_WW_COOL_MS: the longest cooldown of a region found written, 0 to 60000 ms (RW_COOL_MAX_MS by default); the
+// first one is 16 ms, or the cap when that is shorter. Logged only when set: the line that turns region tracking on
+// (written_pages) gives the values in use.
 static void region_watch_init(void) {
     const char *c = cfg_get("TOTK_WW_COOL_MS");
     if (c && *c) {
@@ -284,15 +294,15 @@ static void region_watch_init(void) {
         rt_log("memory: a region found written stays thawed for %u ms at most (TOTK_WW_COOL_MS=%s)", rw_cool_max, c);
     }
     const char *e = cfg_get("TOTK_WW_REGION_KB");
-    if (!e || !*e) return;
-    long kb = strtol(e, NULL, 10);
+    long kb = e && *e ? strtol(e, NULL, 10) : WW_REGION_KB;
     unsigned s = BLK_MIN_SHIFT;
     while (s < FRZ_SHIFT && (1l << (s - 10)) < kb) s++;
     blk_shift = s;
     blk_n = 1u << (FRZ_SHIFT - s);
     blk_all = blk_n == 32 ? 0xffffffffu : (1u << blk_n) - 1;
-    rt_log("memory: write tracking in blocks of %u KiB, %u to a 2 MiB region (TOTK_WW_REGION_KB=%s)", 1u << (s - 10),
-           blk_n, e);
+    if (e && *e)
+        rt_log("memory: write tracking in blocks of %u KiB, %u to a 2 MiB region (TOTK_WW_REGION_KB=%s)",
+               1u << (s - 10), blk_n, e);
 }
 
 void mem_init(void) {
@@ -346,7 +356,7 @@ const RtGuestLayout *mem_layout(void) { return &L; }
 // Where the system tracks no page writes (platform.h plat_mem_watch_problem: a Linux kernel built without userfaultfd,
 // as some handheld kernels are), writes are tracked per 2 MiB region with the frozen regions above. A frozen region was
 // written by nobody since its freeze, as the first write thaws it; any other region counts as written in its thawed
-// blocks: whole by default, in the blocks the game wrote with TOTK_WW_REGION_KB. A query
+// blocks: the blocks the game wrote (TOTK_WW_REGION_KB; whole where the default is the 2 MiB region). A query
 // that resets reports every committed page of each region it finds thawed, also the part outside [addr, addr + size),
 // and freezes the region again, so its next write is seen: the freeze ends the region's record for every consumer
 // (vk_memory.c ww_query stamps what each query reports into one generation table that all of them share). A region
@@ -461,7 +471,9 @@ static int region_tracking(void) {
     if (m >= 0) return m;
     const char *e = cfg_get("TOTK_WRITE_WATCH");
     m = e && !strcmp(e, "region");
-    if (m) rt_log("memory: writes tracked per 2 MiB region (TOTK_WRITE_WATCH=region)");
+    if (m)
+        rt_log("memory: writes tracked per 2 MiB region in blocks of %u KiB, thawed for %u ms at most "
+               "(TOTK_WRITE_WATCH=region)", 1u << (blk_shift - 10), rw_cool_max);
     __atomic_store_n(&region_mode, m, __ATOMIC_RELEASE);
     return m;
 }
@@ -475,9 +487,10 @@ static uint64_t written_pages(uint64_t addr, uint64_t size, uint64_t *pages, uin
         const char *why = n == UINT64_MAX ? plat_mem_watch_problem() : NULL;
         if (!why) return n;
         int was = __atomic_exchange_n(&region_mode, 1, __ATOMIC_ACQ_REL);
-        if (!was) rt_log("memory: the system tracks no page writes (%s): writes are tracked per 2 MiB region instead, "
-                         "coarser and slower than page tracking. Linux: CONFIG_USERFAULTFD and CONFIG_PTE_MARKER_UFFD_WP",
-                         why);
+        if (!was)
+            rt_log("memory: the system tracks no page writes (%s): writes are tracked per 2 MiB region instead, in "
+                   "blocks of %u KiB, thawed for %u ms at most; coarser and slower than page tracking. Linux: "
+                   "CONFIG_USERFAULTFD and CONFIG_PTE_MARKER_UFFD_WP", why, 1u << (blk_shift - 10), rw_cool_max);
     }
     return region_written(addr, size, pages, max, reset);
 }

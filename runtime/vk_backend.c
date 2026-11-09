@@ -221,6 +221,7 @@ static void replay_main(void *arg) {
             vk_texture_release(it.tex);
             free((void *)it.tex);
         } else {
+            perf_pin_frame();   // TOTK_PIN_RENDER: this thread replays
             uint64_t frame = __atomic_add_fetch(&gfx_counters.frames, 1, __ATOMIC_RELAXED);
             present_image(it.tex, it.has_crop ? it.crop : NULL, it.at, it.queued, frame, it.value);
         }
@@ -330,6 +331,7 @@ static void vk_be_present(const tex_t *t, const int crop[4], uint64_t at_ns) {
     if (!gfx_replay_async()) {
         uint64_t frame = __atomic_add_fetch(&gfx_counters.frames, 1, __ATOMIC_RELAXED);
         perf_present(frame);   // before vk_exec_frame_log, which resets the frame's exec counts the flight recorder reads
+        perf_pin_frame();      // TOTK_PIN_RENDER: this thread replays; after perf_present's cpu_placement
         present_image(t, crop, at_ns, kern_now_ns(), frame, 0);
         return;
     }

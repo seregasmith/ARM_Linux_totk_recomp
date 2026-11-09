@@ -99,9 +99,36 @@ static void alt_stack(void) {
     sigaltstack(&ss, NULL);
 }
 
+// The processors the process may use: plat_process_affinity's mask, else the one a thread had before
+// plat_thread_affinity first restricted it; 0 until either ran. Linux threads start with their creator's mask, so once
+// a thread was restricted (proc_narrowed) thread_main gives each new thread this one, and plat_cpu_cores,
+// plat_cpu_usable and plat_cpu_fastest read it in place of the calling thread's own (process_cpus).
+static uint64_t proc_mask;
+static int32_t proc_narrowed;
+
+static void mask_to_set(uint64_t mask, cpu_set_t *set) {
+    CPU_ZERO(set);
+    for (int i = 0; i < 64; i++)
+        if (mask >> i & 1) CPU_SET(i, set);
+}
+
+// The processors of the process: proc_mask once a thread was restricted, else the calling thread's (every thread's).
+static int process_cpus(cpu_set_t *set) {
+    if (__atomic_load_n(&proc_narrowed, __ATOMIC_ACQUIRE)) {
+        mask_to_set(__atomic_load_n(&proc_mask, __ATOMIC_ACQUIRE), set);
+        return 1;
+    }
+    return !sched_getaffinity(0, sizeof *set, set);
+}
+
 static void *thread_main(void *p) {
     PlatThread *t = p;
     alt_stack();
+    if (__atomic_load_n(&proc_narrowed, __ATOMIC_ACQUIRE)) {   // not the processors of a restricted creator
+        cpu_set_t set;
+        mask_to_set(__atomic_load_n(&proc_mask, __ATOMIC_ACQUIRE), &set);
+        sched_setaffinity(0, sizeof set, &set);
+    }
     __atomic_store_n(&t->tid, (int32_t)syscall(SYS_gettid), __ATOMIC_RELEASE);
     if (t->name[0]) pthread_setname_np(pthread_self(), t->name);
     t->fn(t->arg);
@@ -135,7 +162,7 @@ static int read_u64_file(const char *path, uint64_t *v);
 int plat_cpu_cores(uint64_t *all, uint64_t *first) {
     cpu_set_t set;
     *all = *first = 0;
-    if (sched_getaffinity(0, sizeof set, &set)) return 0;
+    if (!process_cpus(&set)) return 0;
     int cores = 0;
     uint64_t seen[64][2];
     for (int i = 0; i < 64; i++) {
@@ -154,13 +181,36 @@ int plat_cpu_cores(uint64_t *all, uint64_t *first) {
     return cores;
 }
 
-// Linux has no process-wide affinity: each thread of /proc/self/task gets the mask, and threads started later inherit
-// it from the thread that starts them.
+// The fastest processors in among: those with the largest cpu_capacity (the scheduler's relative capacity, which
+// arm64 kernels give big.LITTLE CPUs: 1024 for the Odin 3's cores 6-7, 836 for cores 0-5), else the largest
+// cpuinfo_max_freq. 0 when neither file tells them apart: all alike, or a processor's file missing.
+uint64_t plat_cpu_fastest(uint64_t among) {
+    static const char *const files[] = {"cpu_capacity", "cpufreq/cpuinfo_max_freq"};
+    for (int f = 0; f < 2; f++) {
+        uint64_t best = 0, low = UINT64_MAX, fast = 0;
+        int i = 0;
+        for (; i < 64; i++) {
+            if (!(among >> i & 1)) continue;
+            char path[96];
+            uint64_t v;
+            snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/%s", i, files[f]);
+            if (!read_u64_file(path, &v)) break;
+            if (v > best) best = v, fast = 0;
+            if (v == best) fast |= 1ull << i;
+            if (v < low) low = v;
+        }
+        if (i == 64 && fast && low < best) return fast;
+    }
+    return 0;
+}
+
+// Linux has no process-wide affinity: each thread of /proc/self/task gets the mask, and threads started later get it
+// too (from the thread that starts them, or from thread_main once a thread was restricted). It also undoes
+// plat_thread_affinity: the caller restricts its threads again (perf.c cpu_gen).
 int plat_process_affinity(uint64_t mask) {
     cpu_set_t set;
-    CPU_ZERO(&set);
-    for (int i = 0; i < 64; i++)
-        if (mask >> i & 1) CPU_SET(i, &set);
+    mask_to_set(mask, &set);
+    __atomic_store_n(&proc_mask, mask, __ATOMIC_RELEASE);
     DIR *d = opendir("/proc/self/task");
     if (!d) return 0;
     int ok = 1;
@@ -475,13 +525,15 @@ uint64_t plat_thread_affinity(PlatThread *t, uint64_t mask) {
     pthread_t th = t ? t->t : pthread_self();
     cpu_set_t old, set;
     if (pthread_getaffinity_np(th, sizeof old, &old)) return 0;
-    CPU_ZERO(&set);
-    for (int i = 0; i < 64; i++)
-        if (mask >> i & 1) CPU_SET(i, &set);
-    if (pthread_setaffinity_np(th, sizeof set, &set)) return 0;
     uint64_t prev = 0;
     for (int i = 0; i < 64; i++)
         if (CPU_ISSET(i, &old)) prev |= 1ull << i;
+    // The first restriction: until now every thread had the process's processors (proc_mask), this one's included.
+    uint64_t none = 0;
+    __atomic_compare_exchange_n(&proc_mask, &none, prev, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&proc_narrowed, 1, __ATOMIC_RELEASE);
+    mask_to_set(mask, &set);
+    if (pthread_setaffinity_np(th, sizeof set, &set)) return 0;
     return prev;
 }
 
@@ -493,7 +545,7 @@ uint32_t plat_cpu_count(void) {
 // The processors of the process's affinity mask (taskset, a launcher's CPU set), every online one when it is unknown.
 uint32_t plat_cpu_usable(void) {
     cpu_set_t set;
-    if (!sched_getaffinity(0, sizeof set, &set) && CPU_COUNT(&set) > 0) return (uint32_t)CPU_COUNT(&set);
+    if (process_cpus(&set) && CPU_COUNT(&set) > 0) return (uint32_t)CPU_COUNT(&set);
     return plat_cpu_count();
 }
 

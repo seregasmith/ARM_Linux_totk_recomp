@@ -485,6 +485,9 @@ work through these:
   layout, with three Cortex-A510 little cores.
   - Pin the host threads of the three virtual cores to big cores.
   - Keep the shader-compile and recorder threads off those cores.
+  - First step: `TOTK_PIN_RENDER` (`runtime/perf.c` `perf_pin_frame`) keeps the thread that replays, and with `2` the
+    recorder, on the fastest cores. On by default on ARM64 Linux since the Odin 3 runs (`docs/arm64-performance.md`,
+    "Defaults on ARM64 Linux").
 - **Spin waits.** Compare `yield`, `isb` and `wfe` in `rt_spin_gate` and `plat_pause`.
 - **Asynchronous preemption.** Finish the stub from Phase 2, step 8, if it is not done yet.
 

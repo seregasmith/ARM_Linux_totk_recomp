@@ -35,6 +35,9 @@ uint64_t perf_begin(void);                      // start time of a wait; pair wi
 void perf_end(int kind, uint64_t t0);           // counts render-thread time only
 void perf_replay(uint64_t t0);                  // replay (NVN -> Vulkan recording) time on any thread, waits inside it included
 void perf_replay_thread(void);                  // the calling thread replays for the render thread: perf_end counts its waits
+struct PlatThread;                              // platform/platform.h
+void perf_pin_frame(void);                      // the thread that replays, at every present: TOTK_PIN_RENDER
+void perf_pin_recorder(struct PlatThread *t);   // the recorder thread, which TOTK_PIN_RENDER=2 pins too
 void perf_main_thread(void);                    // the calling thread is the guest main thread (TOTK_PROFILE_MAIN)
 // Events per 60-frame window: graphics pipelines finished by the background workers, draws skipped while pending,
 // first texture uploads and re-uploads after CPU writes, draws skipped while a shader translates in the background,

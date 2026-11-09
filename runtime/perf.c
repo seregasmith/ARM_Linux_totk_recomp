@@ -1,6 +1,6 @@
 // Frame timing (TOTK_TRACE=perf, the frame-time summary, the performance overlay's counts), the A/B switches (rt_ab,
-// rt_knob) and TOTK_ONE_PER_CORE. The sampling profiler (TOTK_PROFILE) is the OS's (prof_win.c); without one the weak
-// prof_sampler_* below do nothing.
+// rt_knob), TOTK_ONE_PER_CORE and TOTK_PIN_RENDER. The sampling profiler (TOTK_PROFILE) is the OS's (prof_win.c);
+// without one the weak prof_sampler_* below do nothing.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -235,6 +235,9 @@ int rt_knob(const char *name, const char *def) {
     return !strcmp(e, "ab") ? 2 : strcmp(e, "0") != 0;
 }
 
+static uint64_t cpu_now;   // the processors cpu_placement gave every thread last; 0 before the first present
+static uint32_t cpu_gen;   // counts those changes: each one also undid the pins of perf_pin_frame
+
 // TOTK_ONE_PER_CORE=1: the process keeps the first logical processor of each physical core, so busy threads (the
 // render thread, the guest cores, the job workers) never share a core's execution units with another; "ab" switches
 // it with the A/B blocks. Off by default until measured here; Savage Wind Recomp
@@ -255,6 +258,90 @@ static void cpu_placement(void) {
     if (on == applied) return;
     applied = on;
     plat_process_affinity(on ? one : all);
+    __atomic_store_n(&cpu_now, on ? one : all, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&cpu_gen, 1, __ATOMIC_RELEASE);   // after cpu_now: perf_pin_frame reads them the other way round
+}
+
+// TOTK_PIN_RENDER: 1 keeps the thread that replays on the fastest processors (plat_cpu_fastest: the prime cores of a
+// big.LITTLE CPU), 2 also the recorder thread (vk_rec.c), "ab" switches 1 with the A/B blocks; 0: the scheduler places
+// them. That thread is the render thread, or the replay thread with TOTK_REPLAY_ASYNC=1. With the recorder on, the
+// Odin 3's scheduler kept the render thread on the prime cores 51% of the time (95% without), and it ran 190 MHz slower
+// on average (docs/arm64-performance.md, "Open"). The thread that replays calls perf_pin_frame at every present
+// (vk_backend.c); rec_begin hands over the recorder thread when it starts it.
+// The default is 2 on ARM64 Linux: on the Odin 3, recorder on and pinned beat recorder off and unpinned in both
+// sessions (docs/arm64-performance.md, "Defaults on ARM64 Linux"). Elsewhere 0, unmeasured. The default needs two
+// fastest processors at least, the measured case: with one, the thread that replays would share it with everything
+// else the scheduler puts there. Set explicitly, 1 still pins to it, and 2 pins only that thread, as the recorder
+// would share the processor with it.
+#ifndef PIN_RENDER_DEFAULT
+#if defined(__aarch64__) && defined(__linux__)
+#define PIN_RENDER_DEFAULT "2"
+#else
+#define PIN_RENDER_DEFAULT "0"
+#endif
+#endif
+static PlatThread *pin_rec;
+
+void perf_pin_recorder(PlatThread *t) { __atomic_store_n(&pin_rec, t, __ATOMIC_RELEASE); }
+
+static void cpu_list(uint64_t mask, char *out, size_t cap) {
+    size_t k = 0;
+    out[0] = 0;
+    for (int i = 0; i < 64 && k < cap; i++) {
+        if (!(mask >> i & 1)) continue;
+        int j = i;
+        while (j < 63 && mask >> (j + 1) & 1) j++;
+        k += (size_t)snprintf(out + k, cap - k, j > i ? "%s%d-%d" : "%s%d", k ? "," : "", i, j);
+        i = j;
+    }
+}
+
+void perf_pin_frame(void) {
+    static int level = -1, ab;
+    static uint64_t fast, applied;
+    static uint32_t gen;
+    static PlatThread *rec;
+    if (level < 0) {
+        const char *e = cfg_get("TOTK_PIN_RENDER");
+        int set = e && *e;
+        if (!set) e = PIN_RENDER_DEFAULT;
+        ab = !strcmp(e, "ab");
+        level = ab ? 1 : !strcmp(e, "0") ? 0 : !strcmp(e, "1") ? 1 : !strcmp(e, "2") ? 2 : -1;
+        uint64_t all = __atomic_load_n(&cpu_now, __ATOMIC_ACQUIRE);
+        PlatThread *r = __atomic_load_n(&pin_rec, __ATOMIC_ACQUIRE);
+        fast = level > 0 ? plat_cpu_fastest(all) : 0;
+        int n = __builtin_popcountll(fast), alone = level == 2 && n < 2;
+        const char *why = level < 0 ? "not 0, 1, 2 or ab"
+                        : !level ? NULL
+                        : !fast || fast == all ? "the processors do not differ in speed, or it is unknown here"
+                        : n < 2 && !set ? "one fastest processor, too few for the default"
+                        : NULL;
+        char cpus[64];
+        cpu_list(fast, cpus, sizeof cpus);
+        if (why)
+            rt_log("cpu: TOTK_PIN_RENDER=%s%s: %s; nothing pinned", e, set ? "" : " (default)", why), level = 0;
+        else if (level)
+            rt_log("cpu: TOTK_PIN_RENDER=%s%s: the thread that replays%s on processor%s %s, the fastest of %d%s", e,
+                   set ? "" : " (default)",
+                   alone ? " alone (the recorder would share its processor)"
+                   : level == 2 && r ? " and the recorder" : level == 2 ? " (no recorder thread)" : "",
+                   n > 1 ? "s" : "", cpus, __builtin_popcountll(all), ab ? ", in the B blocks" : "");
+        if (alone && level) level = 1;
+    }
+    if (!level) return;
+    int on = ab ? rt_ab() : 1;
+    uint32_t g = __atomic_load_n(&cpu_gen, __ATOMIC_ACQUIRE);
+    uint64_t now = __atomic_load_n(&cpu_now, __ATOMIC_ACQUIRE);
+    uint64_t want = on && (fast & now) ? fast & now : now;   // never outside what cpu_placement gave every thread
+    PlatThread *r = __atomic_load_n(&pin_rec, __ATOMIC_ACQUIRE);
+    if (want == applied && g == gen && r == rec) return;
+    applied = want, gen = g, rec = r;
+    if (!plat_thread_affinity(NULL, want)) {
+        rt_log("cpu: TOTK_PIN_RENDER: the thread's processors cannot be set: nothing pinned");
+        level = 0;
+        return;
+    }
+    if (level == 2 && rec) plat_thread_affinity(rec, want);
 }
 
 void perf_present(uint64_t frame) {

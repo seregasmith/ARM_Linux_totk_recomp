@@ -33,7 +33,8 @@ void plat_thread_join(PlatThread *t);     // waits for fn to return, then frees 
 int plat_thread_join_ns(PlatThread *t, uint64_t ns);
 void plat_thread_detach(PlatThread *t);   // frees t; the thread runs on
 // Restricts t (NULL: the calling thread) to the logical processors in mask (bit n = processor n of the first group).
-// Returns the previous mask, 0 on failure.
+// Returns the previous mask, 0 on failure. Threads it starts later still get every processor of the process, and
+// plat_process_affinity undoes it.
 uint64_t plat_thread_affinity(PlatThread *t, uint64_t mask);
 uint32_t plat_cpu_count(void);            // logical processors of the machine (system info)
 uint32_t plat_cpu_usable(void);           // the ones this process may run on (its affinity mask): size thread pools by it
@@ -41,6 +42,9 @@ uint64_t plat_thread_cpu_ns(uint32_t tid);  // CPU time of the thread with id ti
 // The logical processors the process may use (bit n = processor n, the first 64), into *all, and the lowest of each
 // physical core among them into *first; returns the number of physical cores, 0 when unknown.
 int plat_cpu_cores(uint64_t *all, uint64_t *first);
+// The fastest processors in among (bit n = processor n), such as the prime cores of a big.LITTLE CPU; 0 when they all
+// run alike or it is unknown (always on Windows).
+uint64_t plat_cpu_fastest(uint64_t among);
 int plat_process_affinity(uint64_t mask);   // every thread of the process to the processors in mask; 1 on success
 
 // Interrupting a thread (kernel.c's asynchronous preemption). A thread makes its own handle; another thread stops it

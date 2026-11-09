@@ -203,6 +203,7 @@ void rec_begin(VkCommandBuffer cb, uint64_t fence, int crumb, uint64_t n) {
             Q.pub_words = rec_chk ? 0 : pw && *pw ? (uint64_t)atoi(pw) : 64;
             if (Q.pub_words > RING_WORDS / 8) Q.pub_words = RING_WORDS / 8;
             rec_thread = plat_thread_new(rec_main, NULL, "vk recorder");
+            perf_pin_recorder(rec_thread);   // TOTK_PIN_RENDER=2 pins it with the thread that replays (perf.c)
             if (!rec_thread) {
                 rt_log("vk_rec: no recorder thread: the replay makes its Vulkan calls itself");
                 mode = 0;
