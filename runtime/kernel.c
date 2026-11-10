@@ -1357,6 +1357,7 @@ static void guest_main(void *p) {
     Cpu *c;
     kern_main_thread(&c);
     if (!plat_jmp_save(&tcur->exit_jmp)) fn(c);
+    perf_pin_main(NULL);   // the handle is freed by the join; TOTK_PIN_MAIN stops using it first (perf.c)
     thread_finish(tcur);
     return;
 }
@@ -1364,6 +1365,7 @@ static void guest_main(void *p) {
 void kern_run_on_guest_main(void (*fn)(Cpu *c)) {
     PlatThread *h = plat_thread_new_ex(guest_main, (void *)fn, "guest main", HOST_STACK);
     if (!h) rt_fatal("kernel: cannot start the guest main thread");
+    perf_pin_main(h);   // TOTK_PIN_MAIN: the thread that replays pins it at each present (perf.c perf_pin_frame)
     plat_thread_join(h);
 }
 

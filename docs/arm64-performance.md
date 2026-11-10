@@ -332,6 +332,25 @@ Elsewhere the defaults stay as they were: 2048, 1024 and 0. An x86 Linux kernel 
 region, and the x86 harness favoured small blocks there too, but no run in play measured it. Setting any of the three
 still overrides the default, so the old behaviour is `TOTK_WW_REGION_KB=2048 TOTK_WW_COOL_MS=1024 TOTK_PIN_RENDER=0`.
 
+### The main thread on the prime cores (`TOTK_PIN_MAIN`)
+
+With those defaults the main thread's chain holds the frame: about 10 ms of game code, 9 ms waiting for the job
+workers and 2-3 ms for the GPU, out of 22.8 ms ([arm64-guest-code.md](arm64-guest-code.md), "Why this now"). It ran
+on the prime cores 10-17% of the time, at about 2.77 GHz against their 3.07 GHz.
+
+`TOTK_PIN_MAIN=1` keeps it on the same cores as `TOTK_PIN_RENDER` (`runtime/perf.c` `perf_pin_frame`; `kernel.c`
+`kern_run_on_guest_main` hands over the thread); `ab` switches it with the A/B blocks. Off by default.
+
+- Expected: about 1 ms less game code a frame at the higher clock, +1.5-2 fps, if it does not wait for a core.
+- Cost: the prime cores then hold three busy threads (render 0.54, recorder 0.23, main 0.44 of a core). The report's
+  `waitCPU%` of `g1004 p30`, `vk recorder` and `guest main` shows the waiting.
+- Sessions back to back on the same route, with `TOTK_SYSMON=1` and the defaults:
+  1. nothing added, the reference;
+  2. `TOTK_PIN_MAIN=1`: render thread, recorder and main thread on the prime cores;
+  3. `TOTK_PIN_RENDER=1 TOTK_PIN_MAIN=1`: the recorder left to the scheduler.
+- Compare: the main thread's `on prime`, `MHz` and `waitCPU%`; its CPU time per frame (`core%` / fps); the fps over
+  world 20-45 s.
+
 ### Ruled out
 
 - **Replay on the submitting thread** (2026-11-06).

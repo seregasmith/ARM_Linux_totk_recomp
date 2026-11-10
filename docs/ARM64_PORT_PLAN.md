@@ -489,7 +489,7 @@ work through these:
   - Keep the shader-compile and recorder threads off those cores.
   - First step: `TOTK_PIN_RENDER` (`runtime/perf.c` `perf_pin_frame`) keeps the thread that replays, and with `2` the
     recorder, on the fastest cores. On by default on ARM64 Linux since the Odin 3 runs (`docs/arm64-performance.md`,
-    "Defaults on ARM64 Linux").
+    "Defaults on ARM64 Linux"). `TOTK_PIN_MAIN` does the same for the guest main thread, off until measured.
 - **Spin waits.** Compare `yield`, `isb` and `wfe` in `rt_spin_gate` and `plat_pause`.
 - **Asynchronous preemption.** Finish the stub from Phase 2, step 8, if it is not done yet.
 

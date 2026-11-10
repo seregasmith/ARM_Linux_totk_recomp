@@ -1,6 +1,6 @@
 // Frame timing (TOTK_TRACE=perf, the frame-time summary, the performance overlay's counts), the A/B switches (rt_ab,
-// rt_knob), TOTK_ONE_PER_CORE and TOTK_PIN_RENDER. The sampling profiler (TOTK_PROFILE) is the OS's (prof_win.c);
-// without one the weak prof_sampler_* below do nothing.
+// rt_knob), TOTK_ONE_PER_CORE, TOTK_PIN_RENDER and TOTK_PIN_MAIN. The sampling profiler (TOTK_PROFILE) is the OS's
+// (prof_win.c); without one the weak prof_sampler_* below do nothing.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -281,8 +281,21 @@ static void cpu_placement(void) {
 #endif
 #endif
 static PlatThread *pin_rec;
+// TOTK_PIN_MAIN: 1 keeps the guest main thread on the same fastest processors, "ab" with the A/B blocks; 0 or unset:
+// the scheduler places it. Off by default until measured. Its game code (about 10 ms a frame) holds the frame on the
+// Odin 3 since the 2026-11-09 defaults, and it ran on the prime cores 10-17% of the time, about 12% below their clock
+// (docs/arm64-performance.md). kern_run_on_guest_main hands over the thread and takes it back (NULL) before it ends;
+// pin_lock keeps the handle valid while perf_pin_frame uses it.
+static PlatThread *pin_main;
+static PlatMutex pin_lock = PLAT_MUTEX_INIT;
 
 void perf_pin_recorder(PlatThread *t) { __atomic_store_n(&pin_rec, t, __ATOMIC_RELEASE); }
+
+void perf_pin_main(PlatThread *t) {
+    plat_mutex_lock(&pin_lock);
+    __atomic_store_n(&pin_main, t, __ATOMIC_RELEASE);
+    plat_mutex_unlock(&pin_lock);
+}
 
 static void cpu_list(uint64_t mask, char *out, size_t cap) {
     size_t k = 0;
@@ -297,23 +310,27 @@ static void cpu_list(uint64_t mask, char *out, size_t cap) {
 }
 
 void perf_pin_frame(void) {
-    static int level = -1, ab;
-    static uint64_t fast, applied;
-    static uint32_t gen;
-    static PlatThread *rec;
+    static int level = -1, ab, mlevel, mab;
+    static uint64_t fast, applied, mapplied;
+    static uint32_t gen, mgen;
+    static PlatThread *rec, *mth;
     if (level < 0) {
-        const char *e = cfg_get("TOTK_PIN_RENDER");
+        uint64_t all = __atomic_load_n(&cpu_now, __ATOMIC_ACQUIRE);
+        PlatThread *r = __atomic_load_n(&pin_rec, __ATOMIC_ACQUIRE);
+        const char *e = cfg_get("TOTK_PIN_RENDER"), *m = cfg_get("TOTK_PIN_MAIN");
         int set = e && *e;
         if (!set) e = PIN_RENDER_DEFAULT;
         ab = !strcmp(e, "ab");
         level = ab ? 1 : !strcmp(e, "0") ? 0 : !strcmp(e, "1") ? 1 : !strcmp(e, "2") ? 2 : -1;
-        uint64_t all = __atomic_load_n(&cpu_now, __ATOMIC_ACQUIRE);
-        PlatThread *r = __atomic_load_n(&pin_rec, __ATOMIC_ACQUIRE);
-        fast = level > 0 ? plat_cpu_fastest(all) : 0;
+        mab = m && !strcmp(m, "ab");
+        mlevel = mab ? 1 : !m || !*m || !strcmp(m, "0") ? 0 : !strcmp(m, "1") ? 1 : -1;
+        fast = level > 0 || mlevel > 0 ? plat_cpu_fastest(all) : 0;
         int n = __builtin_popcountll(fast), alone = level == 2 && n < 2;
+        const char *alike = !fast || fast == all ? "the processors do not differ in speed, or it is unknown here"
+                                                 : NULL;
         const char *why = level < 0 ? "not 0, 1, 2 or ab"
                         : !level ? NULL
-                        : !fast || fast == all ? "the processors do not differ in speed, or it is unknown here"
+                        : alike ? alike
                         : n < 2 && !set ? "one fastest processor, too few for the default"
                         : NULL;
         char cpus[64];
@@ -327,21 +344,45 @@ void perf_pin_frame(void) {
                    : level == 2 && r ? " and the recorder" : level == 2 ? " (no recorder thread)" : "",
                    n > 1 ? "s" : "", cpus, __builtin_popcountll(all), ab ? ", in the B blocks" : "");
         if (alone && level) level = 1;
+        why = mlevel < 0 ? "not 0, 1 or ab" : mlevel ? alike : NULL;
+        if (why)
+            rt_log("cpu: TOTK_PIN_MAIN=%s: %s; nothing pinned", m, why), mlevel = 0;
+        else if (mlevel)
+            rt_log("cpu: TOTK_PIN_MAIN=%s: the guest main thread on processor%s %s, the fastest of %d%s", m,
+                   n > 1 ? "s" : "", cpus, __builtin_popcountll(all), mab ? ", in the B blocks" : "");
     }
-    if (!level) return;
-    int on = ab ? rt_ab() : 1;
+    if (!level && !mlevel) return;
     uint32_t g = __atomic_load_n(&cpu_gen, __ATOMIC_ACQUIRE);
     uint64_t now = __atomic_load_n(&cpu_now, __ATOMIC_ACQUIRE);
-    uint64_t want = on && (fast & now) ? fast & now : now;   // never outside what cpu_placement gave every thread
-    PlatThread *r = __atomic_load_n(&pin_rec, __ATOMIC_ACQUIRE);
-    if (want == applied && g == gen && r == rec) return;
-    applied = want, gen = g, rec = r;
-    if (!plat_thread_affinity(NULL, want)) {
-        rt_log("cpu: TOTK_PIN_RENDER: the thread's processors cannot be set: nothing pinned");
-        level = 0;
-        return;
+    uint64_t pinned = fast & now ? fast & now : now;   // never outside what cpu_placement gave every thread
+    if (level) {
+        uint64_t want = !ab || rt_ab() ? pinned : now;
+        PlatThread *r = __atomic_load_n(&pin_rec, __ATOMIC_ACQUIRE);
+        if (want != applied || g != gen || r != rec) {
+            applied = want, gen = g, rec = r;
+            if (!plat_thread_affinity(NULL, want)) {
+                rt_log("cpu: TOTK_PIN_RENDER: the thread's processors cannot be set: nothing pinned");
+                level = 0;
+            } else if (level == 2 && rec) {
+                plat_thread_affinity(rec, want);
+            }
+        }
     }
-    if (level == 2 && rec) plat_thread_affinity(rec, want);
+    if (mlevel) {
+        uint64_t want = !mab || rt_ab() ? pinned : now;
+        PlatThread *h = __atomic_load_n(&pin_main, __ATOMIC_ACQUIRE);
+        if (h && (want != mapplied || g != mgen || h != mth)) {
+            mapplied = want, mgen = g, mth = h;
+            plat_mutex_lock(&pin_lock);
+            h = pin_main;   // perf_pin_main(NULL) waits for the lock, so the thread is still there
+            int ok = !h || plat_thread_affinity(h, want);
+            plat_mutex_unlock(&pin_lock);
+            if (!ok) {
+                rt_log("cpu: TOTK_PIN_MAIN: the guest main thread's processors cannot be set: nothing pinned");
+                mlevel = 0;
+            }
+        }
+    }
 }
 
 void perf_present(uint64_t frame) {

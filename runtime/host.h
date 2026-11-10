@@ -38,6 +38,7 @@ void perf_replay_thread(void);                  // the calling thread replays fo
 struct PlatThread;                              // platform/platform.h
 void perf_pin_frame(void);                      // the thread that replays, at every present: TOTK_PIN_RENDER
 void perf_pin_recorder(struct PlatThread *t);   // the recorder thread, which TOTK_PIN_RENDER=2 pins too
+void perf_pin_main(struct PlatThread *t);       // the guest main thread for TOTK_PIN_MAIN; NULL before it ends
 void perf_main_thread(void);                    // the calling thread is the guest main thread (TOTK_PROFILE_MAIN)
 // Events per 60-frame window: graphics pipelines finished by the background workers, draws skipped while pending,
 // first texture uploads and re-uploads after CPU writes, draws skipped while a shader translates in the background,
