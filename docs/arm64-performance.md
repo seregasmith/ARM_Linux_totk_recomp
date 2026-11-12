@@ -332,6 +332,10 @@ Elsewhere the defaults stay as they were: 2048, 1024 and 0. An x86 Linux kernel 
 region, and the x86 harness favoured small blocks there too, but no run in play measured it. Setting any of the three
 still overrides the default, so the old behaviour is `TOTK_WW_REGION_KB=2048 TOTK_WW_COOL_MS=1024 TOTK_PIN_RENDER=0`.
 
+Since 2026-11-12 `TOTK_SYNC_AHEAD` (`sync_ahead`, one frame ahead of the GPU) also defaults to 1 on ARM64 Linux
+(`runtime/cfg.c` `SYNC_AHEAD_DEFAULT`) and stays 0 elsewhere; `TOTK_SYNC_AHEAD=0` brings the old wait back. The captures
+in this document predate the switch, so none of them measures it.
+
 ### The main thread on the prime cores (`TOTK_PIN_MAIN`)
 
 With those defaults the main thread's chain holds the frame: about 10 ms of game code, 9 ms waiting for the job

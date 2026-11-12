@@ -114,6 +114,14 @@ static const struct { const char *key, *section; } sections[] = {
 // value (it depends on the machine); its consumer reads cfg_get and keeps an "unset" branch.
 #define LIVE 1
 #define RESTART 0
+// TOTK_SYNC_AHEAD (nvn_api_core.c) defaults to 1 on ARM64 Linux, as TOTK_PIN_RENDER and the write tracking defaults do
+// there (docs/arm64-performance.md, "Defaults on ARM64 Linux"); elsewhere it stays 0. Shadow storage, which the switch
+// needs, is the default on Linux (vk_memory.c vk_mem_shadow_wanted).
+#if defined(__aarch64__) && defined(__linux__)
+#define SYNC_AHEAD_DEFAULT "1"
+#else
+#define SYNC_AHEAD_DEFAULT "0"
+#endif
 static const CfgMeta metas[] = {
     // Screen
     {"FULLSCREEN", "0", "0|1", LIVE}, {"WINDOW_SIZE", "1920x1080", NULL, LIVE},
@@ -168,7 +176,7 @@ static const CfgMeta metas[] = {
     {"REPLAY_WORKERS", "0", "0..16", RESTART}, {"REPLAY_CHUNKS", "0", "0..64", RESTART},
     {"REPLAY_CHUNK_DRAWS", "128", "1..100000", RESTART}, {"REPLAY_STATE_CHECK", "0", "0|1", RESTART},
     {"REPLAY_SKEW_US", "0", "0..100000", RESTART},
-    {"SYNC_AHEAD", "0", "0|1", RESTART}, {"SHADOW_DEFER", "1", "0|1", RESTART},
+    {"SYNC_AHEAD", SYNC_AHEAD_DEFAULT, "0|1", RESTART}, {"SHADOW_DEFER", "1", "0|1", RESTART},
     {"FREE_CORES", "0", "0|1", RESTART}, {"TIMER_1MS", "1", "0|1", RESTART},
     // shaders and pipelines
     {"PIPE_WAIT", "default", "default|draw", RESTART}, {"PIPE_SKIP", "fullscreen", "strict|any|fullscreen", RESTART},
