@@ -559,6 +559,8 @@ APPRUN = '''#!/bin/sh
 # With --cli as the first argument, the command-line setup instead (installer/cli.py: python -m installer --help).
 HERE="$(dirname "$(readlink -f "$0")")"
 export PYTHONDONTWRITEBYTECODE=1
+# Ignore ~/.local/lib/pythonX.Y/site-packages: a user-installed package such as PyPI's `installer` would shadow ours
+export PYTHONNOUSERSITE=1
 export TCL_LIBRARY="$HERE/python/lib/tcl9.0"
 export TK_LIBRARY="$HERE/python/lib/tk9.0"
 if [ "${1:-}" = --cli ]; then
