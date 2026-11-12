@@ -1,5 +1,5 @@
-"""The installer window: event model, form, catalogs, cancel, DPI awareness, a self-closing Tk run and one end-to-end
-run.
+"""The installer window: event model, form, catalogs, cancel, DPI awareness, night mode, a self-closing Tk run and one
+end-to-end run.
 
     .venv-py314\\Scripts\\python tests\\installer_gui_test.py
 
@@ -31,6 +31,7 @@ sys.path.insert(0, str(ROOT))
 from installer import layout as layouts  # noqa: E402
 from installer import dpi  # noqa: E402
 from installer import recent  # noqa: E402
+from installer import theme  # noqa: E402
 try:
     from installer import gui  # noqa: E402
 except ImportError:   # no tkinter
@@ -607,6 +608,200 @@ class PrefillTest(unittest.TestCase):
         self.update.unlink()
         gui.App.match_prefill(self.app, self.state('totk-1.4.3.nsp', 10))
         self.assertEqual(self.shown()['update'], '')
+
+
+def luminance(color):
+    """WCAG relative luminance of '#rrggbb'."""
+    parts = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    r, g, b = [v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in parts]
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast(a, b):
+    """WCAG contrast ratio of two '#rrggbb' colours, 1 to 21; 4.5 is the least for text of normal size."""
+    hi, lo = sorted((luminance(a), luminance(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def night_of(color):
+    return theme.hex_color(*theme.night_rgb(*(int(color[i:i + 2], 16) / 255 for i in (1, 3, 5))))
+
+
+class NightColorsTest(unittest.TestCase):
+    """installer/theme.py without a window: the palette and the rule that turns a theme's colours."""
+
+    def test_light_mode_keeps_the_colours_the_window_had(self):
+        light = theme.COLORS[theme.LIGHT]
+        self.assertEqual({s: light[s] for s in (PENDING, RUNNING, DONE, SKIPPED, FAILED)},
+                         {PENDING: '#808080', RUNNING: '#1a5fb4', DONE: '#26a269', SKIPPED: '#808080',
+                          FAILED: '#c01c28'})
+        self.assertEqual([light[k] for k in ('notice_bg', 'notice_fg', 'error', 'muted', 'warning')],
+                         ['#fff3cd', '#664d03', '#c01c28', '#808080', '#9a6700'])
+
+    def test_both_modes_have_every_colour_the_window_asks_for(self):
+        light, dark = theme.COLORS[theme.LIGHT], theme.COLORS[theme.DARK]
+        self.assertEqual(sorted(light), sorted(dark))
+        wanted = {PENDING, RUNNING, DONE, SKIPPED, FAILED, 'warning'}
+        wanted |= {key for options in theme.OWN_STYLES.values() for key in options.values()}
+        self.assertEqual(sorted(wanted - set(dark)), [])
+
+    def test_night_text_reads_on_what_it_stands_on(self):
+        dark = theme.COLORS[theme.DARK]
+        frame = night_of('#d9d9d9')   # the frame of Tk's default theme, the one the Linux release shows
+        self.assertEqual(frame, '#3b3b3b')
+        low = {k: round(contrast(dark[k], frame), 2) for k in dark if not k.startswith('notice_')
+               if contrast(dark[k], frame) < 4.5}
+        self.assertEqual(low, {})
+        self.assertGreaterEqual(contrast(dark['notice_fg'], dark['notice_bg']), 4.5)
+        self.assertGreaterEqual(contrast(night_of('#000000'), frame), 7)             # labels
+        self.assertGreaterEqual(contrast(night_of('#000000'), night_of('#ffffff')), 7)   # text in a field
+
+    def test_the_rule_mirrors_lightness_and_keeps_the_hue(self):
+        import colorsys
+        greys = [night_of('#%02x%02x%02x' % (v, v, v)) for v in (0, 64, 128, 192, 255)]
+        self.assertEqual([g[1:3] == g[3:5] == g[5:7] for g in greys], [True] * 5)   # grey stays grey
+        self.assertEqual(greys, sorted(greys, reverse=True))                       # lighter in, darker out
+        self.assertLess(luminance(night_of('#ffffff')), 0.02)
+        self.assertGreater(luminance(night_of('#000000')), 0.8)
+        for color in ('#4a6984', '#c01c28', '#26a269'):
+            hues = [colorsys.rgb_to_hls(*(int(c[i:i + 2], 16) / 255 for i in (1, 3, 5)))[0]
+                    for c in (color, night_of(color))]
+            apart = abs(hues[0] - hues[1])
+            self.assertLess(min(apart, 1 - apart), 0.02, color)   # the hue is a circle: 0.99 is next to 0.0
+
+    def test_colour_options_are_told_by_their_names(self):
+        colours = ('-background', '-foreground', '-fieldbackground', '-selectforeground', '-troughcolor',
+                   '-insertcolor', '-arrowcolor', '-indicatorbackground', '-bordercolor', '-focuscolor')
+        others = ('-font', '-padding', '-relief', '-borderwidth', '-anchor', '-width', '-arrowsize', '-insertwidth',
+                  '-focuswidth', '-indicatormargin', '-shiftrelief', '-thickness')
+        self.assertEqual([o for o in colours if not theme.is_color(o)], [])
+        self.assertEqual([o for o in others if theme.is_color(o)], [])
+
+    def test_a_system_drawn_theme_has_no_night_mode(self):
+        """Windows and macOS: the box is not shown, and a switch asked for anyway changes nothing."""
+        set_styles = {}
+        style = SimpleNamespace(theme_use=lambda *a: 'vista',
+                                configure=lambda name, **kw: set_styles.update({name: kw}))
+        night = theme.Night(None, style)
+        self.assertFalse(night.available)
+        night.set(theme.DARK)
+        self.assertEqual(night.mode, theme.LIGHT)
+        self.assertIs(night.colors, theme.COLORS[theme.LIGHT])
+        # the window's own styles still get their light colours, as before night mode existed
+        self.assertEqual(set_styles['Notice.TLabel'], {'background': '#fff3cd', 'foreground': '#664d03'})
+        self.assertEqual(set_styles['Err.TLabel'], {'foreground': '#c01c28'})
+        self.assertEqual(set_styles['Version.TLabel'], {'foreground': '#808080'})
+
+
+class NightWindowTest(unittest.TestCase):
+    """theme.Night on a small window of the widgets the installer uses. Needs Tk and a display."""
+
+    def setUp(self):
+        try:
+            import tkinter
+            from tkinter import ttk
+            self.root = tkinter.Tk()
+        except Exception as e:   # ImportError without tkinter, TclError without a display
+            self.skipTest(f'no Tk window here: {e}')
+        self.addCleanup(self.root.destroy)
+        self.style = ttk.Style(self.root)
+        self.style.configure('Title.TLabel', font=('TkDefaultFont', 15, 'bold'))
+        self.style.configure('Notice.TLabel', padding=8)
+        frame = ttk.Frame(self.root)
+        frame.pack()
+        ttk.Label(frame, text='notice', style='Notice.TLabel').pack()
+        ttk.Entry(frame).pack()
+        self.box = ttk.Combobox(frame, values=['one', 'two'], state='readonly')
+        self.box.pack()
+        ttk.Button(frame, text='button').pack()
+        self.text = tkinter.Text(frame, height=2)
+        self.text.pack()
+        self.night = theme.Night(self.root, self.style)
+        if not self.night.available:
+            self.skipTest(f'the {self.night.base} theme takes no colours')
+        self.root.update()
+
+    def rgb(self, color):
+        return '#%02x%02x%02x' % tuple(v >> 8 for v in self.root.winfo_rgb(str(color)))
+
+    def looks(self):
+        """What a switch may change, and what it must not: theme settings, the plain widgets, the size asked for."""
+        look, tk = self.style.lookup, self.root.tk
+        out = {'theme': self.style.theme_use(), 'size': (self.root.winfo_reqwidth(), self.root.winfo_reqheight())}
+        for name, option, state in (('TFrame', 'background', []), ('TLabel', 'foreground', []),
+                                    ('TEntry', 'fieldbackground', []), ('TEntry', 'selectbackground', ['focus']),
+                                    ('TCombobox', 'fieldbackground', ['readonly']),
+                                    ('TButton', 'background', ['active']),
+                                    ('TLabel', 'foreground', ['disabled']), ('TProgressbar', 'background', []),
+                                    ('TButton', 'padding', []), ('TButton', 'relief', []), ('Title.TLabel', 'font', []),
+                                    ('Notice.TLabel', 'background', []), ('Notice.TLabel', 'padding', []),
+                                    ('Err.TLabel', 'foreground', []), ('Version.TLabel', 'foreground', [])):
+            out[name, option, tuple(state)] = str(look(name, option, state))
+        for option in ('background', 'foreground', 'insertbackground', 'selectbackground', 'selectforeground'):
+            out['log', option] = str(self.text.cget(option))
+        out['window'] = str(self.root.cget('background'))
+        lists = str(self.box) + '.popdown.f.l'   # the drop-down list, once Tk or a switch has made it
+        if int(tk.call('winfo', 'exists', lists)):
+            out['list'] = [str(tk.call(lists, 'cget', '-' + o))
+                           for o in ('background', 'foreground', 'selectbackground')]
+        return out
+
+    def test_night_and_back(self):
+        self.root.update()
+        before = self.looks()
+        self.night.set(theme.DARK)
+        self.root.update()
+        dark = self.looks()
+        self.assertEqual((dark['theme'], self.night.mode), (theme.NIGHT_THEME, theme.DARK))
+        self.assertIs(self.night.colors, theme.COLORS[theme.DARK])
+        frame, text = self.rgb(dark['TFrame', 'background', ()]), self.rgb(dark['TLabel', 'foreground', ()])
+        field = self.rgb(dark['TEntry', 'fieldbackground', ()])
+        self.assertLess(luminance(frame), 0.1)
+        self.assertLess(luminance(field), luminance(frame))
+        self.assertGreaterEqual(contrast(text, frame), 7)
+        self.assertGreaterEqual(contrast(text, field), 7)
+        # Tk's plain widgets take the theme's tones: the log, the list of the drop-down box, the window itself
+        self.assertEqual((self.rgb(dark['log', 'background']), self.rgb(dark['log', 'foreground'])), (field, text))
+        self.assertEqual((self.rgb(dark['log', 'insertbackground']), self.rgb(dark['window'])), (text, frame))
+        self.assertEqual([self.rgb(c) for c in dark['list'][:2]], [field, text])
+        # the window's own styles take the palette, and every text colour of it reads on the frame
+        colors = theme.COLORS[theme.DARK]
+        self.assertEqual((dark['Notice.TLabel', 'background', ()], dark['Err.TLabel', 'foreground', ()],
+                          dark['Version.TLabel', 'foreground', ()]),
+                         (colors['notice_bg'], colors['error'], colors['muted']))
+        self.assertEqual({k: v for k, v in colors.items()
+                          if not k.startswith('notice_') and contrast(v, frame) < 4.5}, {})
+        # nothing that sizes a widget changes, so the window keeps its size
+        same = ['size', ('TButton', 'padding', ()), ('TButton', 'relief', ()), ('Title.TLabel', 'font', ()),
+                ('Notice.TLabel', 'padding', ())]
+        self.assertEqual([dark[k] for k in same], [before[k] for k in same])
+        self.night.set(theme.LIGHT)
+        self.root.update()
+        after = self.looks()
+        light_list = [self.rgb(c) for c in after.pop('list')]   # the switch made the list: it has no "before"
+        self.assertEqual(after, before)
+        self.assertGreater(luminance(light_list[0]), 0.8)
+        self.assertGreaterEqual(contrast(light_list[1], light_list[0]), 7)
+        self.night.set(theme.DARK)   # the second time the theme is there already
+        self.assertEqual(self.looks()['theme'], theme.NIGHT_THEME)
+
+    def test_the_styles_named_here_are_enough(self):
+        """Tk 8.6 cannot list a theme's styles: the night theme made from STYLES alone gives the window's widgets the
+        same settings as the one made from the full list."""
+        self.night.set(theme.DARK)
+        self.root.update()
+        full = self.looks()
+        self.night.set(theme.LIGHT)
+        second = theme.Night(self.root, self.style)
+        second.style_names = lambda: sorted(theme.STYLES)
+        named = theme.NIGHT_THEME + '-named'
+        with unittest.mock.patch.object(theme, 'NIGHT_THEME', named):
+            second.set(theme.DARK)
+            self.root.update()
+            short = self.looks()
+        self.assertEqual(short.pop('theme'), named)
+        full.pop('theme')
+        self.assertEqual(short, full)
 
 
 class SmokeTest(unittest.TestCase):

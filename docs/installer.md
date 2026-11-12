@@ -137,11 +137,16 @@ python -m installer --base FILE --update FILE --keys FILE --lang CODE --dest DIR
   window; every sentence is an id in `installer/text/<en|ru|pt-BR|zh-Hans>.json`. A Chinese window still starts with
   English as the game language, because Chinese game text needs the Switch shared fonts, which the setup extracts only
   from a firmware folder. A folder with
-  `totk-install.json` needs only the folder. `--selftest [--shots DIR]` builds every screen in every language and
-  closes itself. The window is not stretched on a display whose scale is the system DPI: `installer/dpi.py` makes the
+  `totk-install.json` needs only the folder. A "Night mode" box next to the language switch turns the window dark
+  (`installer/theme.py`): the night theme is a copy of the ttk theme in use with the lightness of every colour
+  mirrored, so nothing changes size, and the log, the drop-down lists and Tk's file and folder pickers follow. The
+  box is there where the theme takes colours (Linux); the themes Windows and macOS draw themselves get none. The
+  window starts in light mode each time. `--selftest [--shots DIR]` builds every screen in every language, in light
+  and night mode, and closes itself. The window is not stretched on a display whose scale is the system DPI: `installer/dpi.py` makes the
   process system DPI aware before Tk starts, Tk then draws the fonts at the display's scale and `dpi.px` sizes the
   paddings and wrap widths with it; the launcher does the same for its error box.
-- `tests/installer_gui_test.py`: event model, form, catalogs, cancel, the display scale, the self-closing window and
+- `tests/installer_gui_test.py`: event model, form, catalogs, cancel, the display scale, night mode (the contrast of
+  its colours, a switch to night and back on a small window), the self-closing window and
   one end-to-end run of the CLI in `--verify` mode (needs `build/install-test` and `build/extracted/v121`; see its
   docstring).
 - `tests/installer_test.py`: bookkeeping with fake steps. `tests/installer_e2e.py`: a dev-mode run with the files of

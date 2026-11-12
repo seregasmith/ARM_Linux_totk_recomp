@@ -121,6 +121,7 @@
  "ui.rebuild_title": "Recompilando o jogo para os seus mods",
  "ui.start_game": "Iniciar o jogo",
  "ui.version": "versão {version}",
+ "ui.night": "Modo noturno",
  "ui.intro": "Monta uma pasta jogável de Tears of the Kingdom a partir dos seus próprios arquivos do jogo. Isso demora um pouco e só precisa ser feito uma vez.",
  "ui.notice": "A pasta que esta instalação monta contém o jogo. Ela é só para seu uso pessoal; não compartilhe nem envie para a internet.",
  "ui.keys_private": "O arquivo de chaves é lido no lugar. O conteúdo dele nunca é mostrado, copiado nem guardado.",

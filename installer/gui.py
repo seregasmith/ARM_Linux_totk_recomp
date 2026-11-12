@@ -7,9 +7,11 @@ each update installs into its own folder there, the window names the installed v
 running Steam client to add the highest one. The code level box passes --cpu (default: the one the host check picks,
 or TOTK_CPU). Decisions live in guilogic.py; this file only draws. The window text is in
 installer/text/<en|ru|pt-BR|zh-Hans>.json under "ui.*" and "launcher.*" ids. On Windows the window follows the
-display's DPI (installer/dpi.py): fonts and paddings grow with the scale, so Windows does not stretch it.
+display's DPI (installer/dpi.py): fonts and paddings grow with the scale, so Windows does not stretch it. The box next
+to the language switch turns night mode on (installer/theme.py), where the theme takes colours.
 
-    --selftest [--shots DIR]   build every screen in every language and close by itself (PNG per screen with --shots)
+    --selftest [--shots DIR]   build every screen in every language, in light and night mode, and close by itself
+                               (PNG per screen with --shots)
     --lang en|ru|pt-BR|zh-Hans window language (default: the Windows display language)
     --rebuild DIR              rebuild the install folder DIR for its mods (totk.exe starts this, build-cache/rebuild.txt):
                                the run starts at once with that folder, and the game starts again when it succeeds
@@ -41,12 +43,12 @@ from . import games as gamesdir
 from . import ini
 from . import layout as layouts
 from . import recent
+from . import theme
 from .guilogic import (DONE, FAILED, PENDING, RUNNING, SKIPPED, UI_LANGUAGE_LABELS, UI_LANGUAGES, Catalog, Form, Model,
                        Process, amount, default_game_language, describe_event, parse_line, windows_ui_language)
 
 POLL_MS = 100
 GLYPH = {PENDING: '\u25cb', RUNNING: '\u25b6', DONE: '\u2714', SKIPPED: '\u2013', FAILED: '\u2716'}
-COLOR = {PENDING: '#808080', RUNNING: '#1a5fb4', DONE: '#26a269', SKIPPED: '#808080', FAILED: '#c01c28'}
 # The window's pixels at 100%: Tk scales the fonts by itself (tk scaling), these through installer/dpi.py.
 PAD = dpi.px(14)      # padding of the window and its frames
 WRAP = dpi.px(620)    # wrap width of the long labels
@@ -112,9 +114,9 @@ class App:
         self.mono_font = 'Consolas' if os.name == 'nt' else 'DejaVu Sans Mono'
         style = ttk.Style(root)
         style.configure('Title.TLabel', font=(self.ui_font, 15, 'bold'))
-        style.configure('Notice.TLabel', background='#fff3cd', foreground='#664d03', padding=dpi.px(8))
-        style.configure('Err.TLabel', foreground='#c01c28')
-        style.configure('Version.TLabel', foreground='#808080')
+        style.configure('Notice.TLabel', padding=dpi.px(8))
+        # the colours of Notice.TLabel, Err.TLabel and Version.TLabel, of the warnings and of the step marks
+        self.night = theme.Night(root, style)
 
         top = ttk.Frame(root, padding=(PAD, PAD, PAD, 0))
         top.pack(fill='x')
@@ -125,6 +127,12 @@ class App:
         version.pack(side='left', padx=(dpi.px(10), 0), pady=(dpi.px(6), 0))
         sw = ttk.Frame(top)
         sw.pack(side='right')
+        self.night_var = tk.BooleanVar(value=False)
+        if self.night.available:   # not with the themes Windows and macOS draw themselves
+            # beside the language box, not in its frame: a taller frame would move the box in it
+            night_box = ttk.Checkbutton(top, variable=self.night_var, command=self.switch_night)
+            self.bind_text(night_box, 'text', 'ui.night')
+            night_box.pack(side='right', padx=(0, dpi.px(12)))
         self.ui_var = tk.StringVar(value=self.cat.lang)   # the window language code; the box shows its name
         labels = [UI_LANGUAGE_LABELS[c] for c in UI_LANGUAGES]
         self.ui_box = ttk.Combobox(sw, values=labels, state='readonly', width=max(map(len, labels)) + 1)
@@ -192,6 +200,13 @@ class App:
         self.retext()
         self.vars['lang'].set(self.lang_label(code))
         self.fit()
+
+    def switch_night(self):
+        """The night mode box: the theme and Tk's plain widgets (installer/theme.py), then the colours set here."""
+        self.night.set(theme.DARK if self.night_var.get() else theme.LIGHT)
+        self.warn_label.configure(foreground=self.night.colors['warning'])
+        self.refresh_run()
+        self.refresh_finish()
 
     def lang_label(self, code):
         return self.cat('lang.' + code)
@@ -342,7 +357,7 @@ class App:
             bar_holder.configure(height=dpi.px(22))
         self.space_label = ttk.Label(f, wraplength=WRAP, justify='left')
         self.space_label.pack(anchor='w')
-        self.warn_label = ttk.Label(f, wraplength=WRAP, justify='left', foreground='#9a6700')
+        self.warn_label = ttk.Label(f, wraplength=WRAP, justify='left', foreground=self.night.colors['warning'])
         self.warn_label.pack(anchor='w')
         self.log_frame = ttk.Frame(f)
         self.log = tk.Text(self.log_frame, height=10, wrap='word', state='disabled', font=(self.mono_font, 9))
@@ -558,7 +573,7 @@ class App:
         m = self.model
         for s, (glyph, name) in self.step_rows.items():
             state = m.states.get(s, PENDING)
-            glyph.configure(text=GLYPH[state], foreground=COLOR[state])
+            glyph.configure(text=GLYPH[state], foreground=self.night.colors[state])
             name.configure(text=self.cat('step.' + s) + (f'  ({self.cat("ui.state_" + state)})'
                                                           if state in (SKIPPED, FAILED) else ''),
                            font=(self.ui_font, 10, 'bold') if state == RUNNING else (self.ui_font, 10))
@@ -657,7 +672,7 @@ class App:
         for s in m.steps:
             state = m.states.get(s, PENDING)
             ttk.Label(self.finish_steps, text=f'{GLYPH[state]}  {self.cat("step." + s)}',
-                      foreground=COLOR[state]).pack(anchor='w')
+                      foreground=self.night.colors[state]).pack(anchor='w')
         if result == 'ok':
             self.open_button.state(['!disabled'])
         else:
@@ -728,13 +743,16 @@ def grab(root, path):
 
 
 def selftest(layout, shots=None):
-    """Every screen in every language; the window closes itself. Returns 0 when nothing raised."""
+    """Every screen in every language, in light mode and, where the theme has one, in night mode; the window closes
+    itself. Returns 0 when nothing raised."""
     fix_tcl_paths()
     os.environ[recent.ENV] = os.path.join(tempfile.mkdtemp(prefix='totk-selftest-'), 'setup.json')
     root = tk.Tk()
     root.geometry('+60+40')
     app = App(root, 'en', layout)
     steps, mixed = [], []
+    modes = (False, True) if app.night.available else (False,)
+    passes = [(lang, night) for lang in UI_LANGUAGES for night in modes]
 
     def shot(name):
         root.update()
@@ -743,10 +761,12 @@ def selftest(layout, shots=None):
             grab(root, Path(shots) / f'{name}.png')
 
     def run_all():
-        for lang in UI_LANGUAGES:
+        for lang, night in passes:
+            app.night_var.set(night)
+            app.switch_night()
             app.ui_var.set(lang)
             app.switch_language()
-            tag = lang
+            tag = lang + ('-night' if night else '')
             app.vars['dest'].set('Z:/selftest/TotK')
             app.vars['base'].set('Z:/selftest/totk.xci')
             app.vars['update'].set('Z:/selftest/totk-1.2.1.nsp')
@@ -765,7 +785,7 @@ def selftest(layout, shots=None):
             app.toggle_log()
             app.refresh_run()
             shot(f'run-{tag}')
-            if lang == 'en':   # the log follows the window language: no English line may remain after the switch
+            if tag == 'en':   # the log follows the window language: no English line may remain after the switch
                 app.ui_var.set('ru')
                 app.switch_language()
                 text = app.log.get('1.0', 'end')
@@ -798,7 +818,7 @@ def selftest(layout, shots=None):
     root.after(200, run_all)
     root.after(60000, root.destroy)   # never leaves a window open
     root.mainloop()
-    return 0 if len(steps) == len(UI_LANGUAGES) and all(steps) and mixed == [False] else 1
+    return 0 if len(steps) == len(passes) and all(steps) and mixed == [False] else 1
 
 
 def main(argv=None):
